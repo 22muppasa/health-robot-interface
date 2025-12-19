@@ -9,10 +9,12 @@ interface WebSocketState {
 }
 
 const defaultSystemStatus: SystemStatus = {
-  assistantState: 'idle',
-  microphoneEnabled: false,
-  cameraEnabled: false,
-  networkConnected: false,
+  assistant_enabled: false,
+  assistant_state: 'idle',
+  last_transcript: '',
+  last_intent: '',
+  call_state: 'not_in_call',
+  last_error: '',
 };
 
 const defaultCallStatus: CallStatus = {
@@ -37,17 +39,16 @@ export function useWebSocket() {
       setState((prev) => ({
         ...prev,
         connected,
-        systemStatus: {
-          ...prev.systemStatus,
-          networkConnected: connected,
-        },
       }));
     });
 
     const unsubStatus = wsManager.on('system_status', (data) => {
+      const status = data as SystemStatus;
       setState((prev) => ({
         ...prev,
-        systemStatus: data as SystemStatus,
+        systemStatus: status,
+        lastTranscript: status.last_transcript,
+        callStatus: { state: status.call_state as CallStatus['state'] },
       }));
     });
 

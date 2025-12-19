@@ -34,7 +34,7 @@ const actions: ActionButton[] = [
     id: 'stop-robot',
     label: 'Stop Robot',
     icon: <StopCircle className="w-6 h-6" />,
-    intent: 'emergency_stop',
+    intent: 'stop',
     variant: 'emergency',
     slots: { immediate: true },
   },

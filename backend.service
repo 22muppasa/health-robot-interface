@@ -1,0 +1,16 @@
+[Unit]
+Description=Health Robot Backend
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/health-robot-interface/backend
+Environment=PATH=/home/pi/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/pi/.local/bin/uvicorn main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target</content>
+<parameter name="filePath">/workspaces/health-robot-interface/backend.service

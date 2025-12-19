@@ -22,7 +22,8 @@ export function VoiceAssistant({
 
   const handleToggle = async (checked: boolean) => {
     try {
-      await api.toggleVoiceAssistant(checked);
+      const intent = checked ? 'assistant_enable' : 'assistant_disable';
+      await api.sendCommand({ intent });
       onToggle(checked);
     } catch (error) {
       console.error('Failed to toggle voice assistant:', error);
@@ -33,7 +34,7 @@ export function VoiceAssistant({
     if (!isEnabled) return;
     setIsPushToTalkActive(true);
     try {
-      await api.pushToTalk(true);
+      await api.sendCommand({ intent: 'assistant_ptt_start' });
     } catch (error) {
       console.error('Failed to start push-to-talk:', error);
     }
@@ -42,7 +43,7 @@ export function VoiceAssistant({
   const handlePushToTalkEnd = useCallback(async () => {
     setIsPushToTalkActive(false);
     try {
-      await api.pushToTalk(false);
+      await api.sendCommand({ intent: 'assistant_ptt_stop' });
     } catch (error) {
       console.error('Failed to end push-to-talk:', error);
     }

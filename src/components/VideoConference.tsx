@@ -31,8 +31,8 @@ export function VideoConference({ callStatus, onStatusChange }: VideoConferenceP
     setIsLoading(true);
     try {
       onStatusChange?.({ state: 'connecting' });
-      await api.joinCall('default-room');
-      onStatusChange?.({ state: 'in_call', roomId: 'default-room' });
+      await api.sendCommand({ intent: 'join_call', slots: { room: 'nurse-station' } });
+      onStatusChange?.({ state: 'in_call', roomId: 'nurse-station' });
     } catch (error) {
       console.error('Failed to join call:', error);
       onStatusChange?.({ state: 'not_in_call' });
@@ -44,7 +44,7 @@ export function VideoConference({ callStatus, onStatusChange }: VideoConferenceP
   const handleEndCall = async () => {
     setIsLoading(true);
     try {
-      await api.endCall();
+      await api.sendCommand({ intent: 'end_call' });
       onStatusChange?.({ state: 'not_in_call' });
       setIsMuted(false);
       setIsVideoOff(false);
@@ -117,7 +117,15 @@ export function VideoConference({ callStatus, onStatusChange }: VideoConferenceP
             <Button
               variant={isMuted ? 'destructive' : 'secondary'}
               size="icon-lg"
-              onClick={() => setIsMuted(!isMuted)}
+              onClick={async () => {
+                const intent = isMuted ? 'unmute_call' : 'mute_call';
+                try {
+                  await api.sendCommand({ intent });
+                  setIsMuted(!isMuted);
+                } catch (error) {
+                  console.error('Failed to toggle mute:', error);
+                }
+              }}
             >
               {isMuted ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
             </Button>

@@ -1,0 +1,16 @@
+[Unit]
+Description=Health Robot Voice Service
+After=network.target backend.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/health-robot-interface/backend
+Environment=PATH=/home/pi/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/pi/.local/bin/python voice_service.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target</content>
+<parameter name="filePath">/workspaces/health-robot-interface/voice.service

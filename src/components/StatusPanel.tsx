@@ -6,14 +6,14 @@ interface StatusPanelProps {
   status: SystemStatus;
 }
 
-const assistantStateLabels: Record<SystemStatus['assistantState'], string> = {
+const assistantStateLabels: Record<SystemStatus['assistant_state'], string> = {
   idle: 'Idle',
   listening: 'Listening',
   processing: 'Processing',
   speaking: 'Speaking',
 };
 
-const assistantStateColors: Record<SystemStatus['assistantState'], string> = {
+const assistantStateColors: Record<SystemStatus['assistant_state'], string> = {
   idle: 'bg-muted text-muted-foreground',
   listening: 'bg-info/15 text-info',
   processing: 'bg-warning/15 text-warning',
@@ -35,40 +35,56 @@ export function StatusPanel({ status }: StatusPanelProps) {
             <div
               className={cn(
                 'w-3 h-3 rounded-full',
-                status.assistantState === 'idle' ? 'bg-muted-foreground' : 'bg-current'
+                status.assistant_state === 'idle' ? 'bg-muted-foreground' : 'bg-current'
               )}
             />
           }
           label="Assistant"
-          value={assistantStateLabels[status.assistantState]}
-          className={assistantStateColors[status.assistantState]}
-          pulse={status.assistantState === 'listening' || status.assistantState === 'processing'}
+          value={assistantStateLabels[status.assistant_state]}
+          className={assistantStateColors[status.assistant_state]}
+          pulse={status.assistant_state === 'listening' || status.assistant_state === 'processing'}
         />
 
         {/* Microphone Status */}
         <StatusItem
-          icon={status.microphoneEnabled ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
+          icon={status.assistant_enabled ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
           label="Microphone"
-          value={status.microphoneEnabled ? 'Active' : 'Off'}
-          className={status.microphoneEnabled ? 'bg-success/15 text-success' : 'bg-muted text-muted-foreground'}
+          value={status.assistant_enabled ? 'Active' : 'Off'}
+          className={status.assistant_enabled ? 'bg-success/15 text-success' : 'bg-muted text-muted-foreground'}
         />
 
-        {/* Camera Status */}
+        {/* Camera Status - Placeholder */}
         <StatusItem
-          icon={status.cameraEnabled ? <Camera className="w-5 h-5" /> : <CameraOff className="w-5 h-5" />}
+          icon={<CameraOff className="w-5 h-5" />}
           label="Camera"
-          value={status.cameraEnabled ? 'Active' : 'Off'}
-          className={status.cameraEnabled ? 'bg-success/15 text-success' : 'bg-muted text-muted-foreground'}
+          value="Off"
+          className="bg-muted text-muted-foreground"
         />
 
         {/* Network Status */}
         <StatusItem
-          icon={status.networkConnected ? <Wifi className="w-5 h-5" /> : <WifiOff className="w-5 h-5" />}
+          icon={<Wifi className="w-5 h-5" />}
           label="Network"
-          value={status.networkConnected ? 'Connected' : 'Disconnected'}
-          className={status.networkConnected ? 'bg-success/15 text-success' : 'bg-destructive/15 text-destructive'}
+          value="Connected"
+          className="bg-success/15 text-success"
         />
       </div>
+
+      {/* Last Intent */}
+      {status.last_intent && (
+        <div className="mt-4 p-3 bg-muted rounded-lg">
+          <p className="text-xs uppercase tracking-wide text-muted-foreground mb-1">Last Intent</p>
+          <p className="text-sm font-medium">{status.last_intent}</p>
+        </div>
+      )}
+
+      {/* Last Error */}
+      {status.last_error && (
+        <div className="mt-4 p-3 bg-destructive/10 rounded-lg">
+          <p className="text-xs uppercase tracking-wide text-destructive mb-1">Last Error</p>
+          <p className="text-sm text-destructive">{status.last_error}</p>
+        </div>
+      )}
     </div>
   );
 }

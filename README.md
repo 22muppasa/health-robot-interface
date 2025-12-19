@@ -1,73 +1,126 @@
-# Welcome to your Lovable project
+# Health Robot Interface
 
-## Project info
+A full-stack application for controlling a healthcare robot with voice assistant, video conferencing, and robot actions.
 
-**URL**: https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID
+## Features
 
-## How can I edit this code?
+- **Voice Assistant**: Always-on VAD with push-to-talk mode using OpenAI STT/TTS
+- **Video Conferencing**: Join Jitsi calls via Chromium kiosk
+- **Robot Actions**: Check vitals, call nurse, navigate, stop
+- **Real-time Updates**: WebSocket for live status updates
+- **TypeScript Frontend**: React dashboard with shadcn/ui
+- **Python Backend**: FastAPI with safety validations
 
-There are several ways of editing your application.
+## Architecture
 
-**Use Lovable**
+- **Frontend**: TypeScript/React with Vite
+- **Backend**: Python/FastAPI
+- **Communication**: REST API + WebSocket
+- **Voice**: WebRTC VAD + OpenAI Whisper/TTS
+- **Conferencing**: Chromium kiosk to Jitsi
+- **Safety**: Hardcoded intent allowlist, no arbitrary code execution
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and start prompting.
+## Setup
 
-Changes made via Lovable will be committed automatically to this repo.
+### Prerequisites
 
-**Use your preferred IDE**
+- Node.js 18+
+- Python 3.8+
+- OpenAI API key
+- Raspberry Pi (for deployment)
 
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
+### Backend Setup
 
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
+```bash
+cd backend
+pip install -r requirements.txt
+cp ../.env.example ../.env
+# Edit .env with your OPENAI_API_KEY
+```
 
-Follow these steps:
+### Frontend Setup
 
-```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
+```bash
+npm install
+```
 
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
+## Running
 
-# Step 3: Install the necessary dependencies.
-npm i
+### Development
 
-# Step 4: Start the development server with auto-reloading and an instant preview.
+```bash
+# Backend
+cd backend
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+# Frontend (new terminal)
 npm run dev
 ```
 
-**Edit a file directly in GitHub**
+### Production on Raspberry Pi
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+1. Install dependencies:
+```bash
+sudo apt update
+sudo apt install python3-pip chromium-browser alsa-utils
+pip install -r backend/requirements.txt
+```
 
-**Use GitHub Codespaces**
+2. Copy systemd services:
+```bash
+sudo cp backend.service /etc/systemd/system/
+sudo cp voice.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable backend
+sudo systemctl start backend
+```
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+3. Build frontend:
+```bash
+npm run build
+# Serve with nginx or similar
+```
 
-## What technologies are used for this project?
+## API
 
-This project is built with:
+### REST Endpoints
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+- `POST /api/command` - Send commands
+  ```json
+  {
+    "intent": "join_call",
+    "slots": {"room": "nurse-station"},
+    "source": "ui"
+  }
+  ```
+- `GET /api/status` - Get current state
 
-## How can I deploy this project?
+### WebSocket
 
-Simply open [Lovable](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and click on Share -> Publish.
+- `ws://localhost:8000/ws` - Real-time updates
+  ```json
+  {
+    "type": "system_update",
+    "payload": {
+      "assistant_state": "listening",
+      "call_state": "in_call",
+      ...
+    }
+  }
+  ```
 
-## Can I connect a custom domain to my Lovable project?
+### Allowed Intents
 
-Yes, you can!
+- `check_vitals`, `call_nurse`, `navigate`, `stop`
+- `join_call`, `mute_call`, `unmute_call`, `end_call`
+- `assistant_enable`, `assistant_disable`, `assistant_ptt_start`, `assistant_ptt_stop`
 
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
+## Configuration
 
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+See `.env.example` for environment variables.
+
+## Safety
+
+- Commands validated against allowlist
+- No shell execution from LLM
+- Confirmation flow for risky actions (placeholder)

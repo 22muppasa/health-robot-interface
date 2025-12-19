@@ -10,7 +10,7 @@ import { Heart } from 'lucide-react';
 const Index = () => {
   const { systemStatus, callStatus, lastTranscript, updateStatus } = useWebSocket();
   const [localCallStatus, setLocalCallStatus] = useState<CallStatus>(callStatus);
-  const [voiceEnabled, setVoiceEnabled] = useState(false);
+  const [voiceEnabled, setVoiceEnabled] = useState(systemStatus.assistant_enabled);
 
   const handleCallStatusChange = (status: CallStatus) => {
     setLocalCallStatus(status);
@@ -18,10 +18,10 @@ const Index = () => {
 
   const handleVoiceToggle = (enabled: boolean) => {
     setVoiceEnabled(enabled);
-    updateStatus({ microphoneEnabled: enabled });
+    updateStatus({ assistant_enabled: enabled });
   };
 
-  const isListening = systemStatus.assistantState === 'listening';
+  const isListening = systemStatus.assistant_state === 'listening';
 
   return (
     <div className="min-h-screen bg-background p-4 lg:p-6">

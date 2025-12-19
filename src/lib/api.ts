@@ -6,16 +6,18 @@ const WS_BASE_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000';
 // Command structure for robot actions
 export interface RobotCommand {
   intent: string;
-  slots: Record<string, string | number | boolean>;
-  timestamp?: string;
+  slots?: Record<string, string | number | boolean>;
+  source?: "ui" | "voice";
 }
 
 // Status types from WebSocket
 export interface SystemStatus {
-  assistantState: 'idle' | 'listening' | 'processing' | 'speaking';
-  microphoneEnabled: boolean;
-  cameraEnabled: boolean;
-  networkConnected: boolean;
+  assistant_enabled: boolean;
+  assistant_state: 'idle' | 'listening' | 'processing' | 'speaking';
+  last_transcript: string;
+  last_intent: string;
+  call_state: 'not_in_call' | 'connecting' | 'in_call';
+  last_error: string;
 }
 
 export interface CallStatus {
@@ -38,45 +40,10 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        ...command,
-        timestamp: new Date().toISOString(),
+        intent: command.intent,
+        slots: command.slots || {},
+        source: command.source || 'ui',
       }),
-    });
-    return response.json();
-  },
-
-  // Video call controls
-  async joinCall(roomId: string): Promise<{ success: boolean; joinUrl?: string }> {
-    const response = await fetch(`${API_BASE_URL}/api/call/join`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ roomId }),
-    });
-    return response.json();
-  },
-
-  async endCall(): Promise<{ success: boolean }> {
-    const response = await fetch(`${API_BASE_URL}/api/call/end`, {
-      method: 'POST',
-    });
-    return response.json();
-  },
-
-  // Voice assistant controls
-  async toggleVoiceAssistant(enabled: boolean): Promise<{ success: boolean }> {
-    const response = await fetch(`${API_BASE_URL}/api/voice/toggle`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled }),
-    });
-    return response.json();
-  },
-
-  async pushToTalk(active: boolean): Promise<{ success: boolean }> {
-    const response = await fetch(`${API_BASE_URL}/api/voice/ptt`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ active }),
     });
     return response.json();
   },
@@ -110,7 +77,11 @@ export class WebSocketManager {
     this.ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        this.emit(data.type, data.payload);
+        if (data.type === 'system_update') {
+          this.emit('system_status', data.payload);
+          this.emit('call_status', { state: data.payload.call_state });
+          this.emit('transcript', { text: data.payload.last_transcript, isFinal: true, timestamp: new Date().toISOString() });
+        }
       } catch (e) {
         console.error('Failed to parse WebSocket message:', e);
       }
