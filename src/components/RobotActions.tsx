@@ -76,12 +76,12 @@ export function RobotActions() {
 
   return (
     <div className="dashboard-card">
-      <div className="flex items-center gap-3 mb-6">
-        <Bot className="w-5 h-5 text-primary" />
-        <h2 className="text-lg font-semibold text-foreground">Robot Actions</h2>
+      <div className="flex items-center gap-2 sm:gap-3 mb-4 sm:mb-6 min-w-0">
+        <Bot className="w-4 h-4 sm:w-5 sm:h-5 text-primary flex-shrink-0" />
+        <h2 className="text-base sm:text-lg font-semibold text-foreground truncate">Robot Actions</h2>
       </div>
 
-      <div className="grid gap-4">
+      <div className="grid gap-2 sm:gap-3 md:gap-4">
         {actions.map((action) => {
           const state = actionStates[action.id];
           const isLoading = state === 'loading';
@@ -93,24 +93,26 @@ export function RobotActions() {
               variant={isSuccess ? 'success' : action.variant}
               size="touch-lg"
               className={cn(
-                'w-full justify-start gap-4 text-left',
+                'w-full justify-start gap-2 sm:gap-3 md:gap-4 text-left text-xs sm:text-sm',
                 action.variant === 'emergency' && !isSuccess && 'animate-none'
               )}
               onClick={() => handleAction(action)}
               disabled={isLoading}
             >
-              <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-background/20">
+              <div className="flex items-center justify-center w-10 h-10 sm:w-12 sm:h-12 rounded-lg sm:rounded-xl bg-background/20 flex-shrink-0">
                 {isLoading ? (
-                  <Loader2 className="w-6 h-6 animate-spin" />
+                  <Loader2 className="w-4 h-4 sm:w-5 sm:h-5 md:w-6 md:h-6 animate-spin" />
                 ) : isSuccess ? (
-                  <CheckCircle2 className="w-6 h-6" />
+                  <CheckCircle2 className="w-4 h-4 sm:w-5 sm:h-5 md:w-6 md:h-6" />
                 ) : (
-                  action.icon
+                  <div className="w-4 h-4 sm:w-5 sm:h-5 md:w-6 md:h-6">
+                    {action.icon}
+                  </div>
                 )}
               </div>
-              <div className="flex flex-col">
-                <span className="font-semibold text-lg">{action.label}</span>
-                <span className="text-sm opacity-80">
+              <div className="flex flex-col min-w-0">
+                <span className="font-semibold text-xs sm:text-sm md:text-base truncate">{action.label}</span>
+                <span className="text-xs opacity-80">
                   {isLoading ? 'Processing...' : isSuccess ? 'Command sent!' : `Execute ${action.intent}`}
                 </span>
               </div>

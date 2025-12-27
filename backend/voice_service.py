@@ -2,23 +2,24 @@ import asyncio
 import webrtcvad
 import numpy as np
 import openai
-from typing import Optional
+from typing import Optional, Any
 import io
 import wave
 from pydub import AudioSegment
 from pydub.playback import play
 import json
+# import sounddevice as sd # Commented out for Codespaces compatibility
 
 class VoiceService:
     def __init__(self, state, api_key: str):
         self.state = state
         self.api_key = api_key
-        self.client = openai.AsyncOpenAI(api_key=api_key)
+        self.client = openai.AsyncOpenAI(api_key="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")
         self.vad = webrtcvad.Vad(3)  # Aggressiveness 0-3
         self.sample_rate = 16000
         self.frame_duration = 30  # ms
         self.frame_size = int(self.sample_rate * self.frame_duration / 1000)
-        self.stream: Optional[sd.InputStream] = None
+        self.stream: Optional[Any] = None # Changed type hint for Codespaces compatibility
         self.is_enabled = False
         self.ptt_active = False
         self.recording = False
@@ -29,107 +30,56 @@ class VoiceService:
 
     async def stop(self):
         if self.stream:
-            self.stream.stop()
-            self.stream.close()
+            # self.stream.stop() # Removed hardware call
+            # self.stream.close() # Removed hardware call
+            pass
 
     async def enable(self):
         self.is_enabled = True
-        if not self.ptt_active:
-            await self.start_listening()
+        # await self.start_listening() # Removed automatic listening
 
     async def disable(self):
         self.is_enabled = False
-        await self.stop_listening()
+        # await self.stop_listening() # Removed automatic listening
 
     async def start_ptt(self):
         self.ptt_active = True
-        await self.start_listening()
-
-    async def stop_ptt(self):
-        self.ptt_active = False
-        await self.transcribe_and_respond()
-        await self.stop_listening()
-
-    async def start_listening(self):
-        if self.recording:
-            return
-        self.recording = True
-        self.audio_buffer = []
         self.state.assistant_state = "listening"
         await self.state.broadcast_update()
 
-        # Simulate recording for demo
-        await asyncio.sleep(2)  # Simulate 2 seconds of speech
-        self.audio_buffer = np.random.randint(-32768, 32767, 16000 * 2, dtype=np.int16).tolist()  # Fake audio
-        await self.transcribe_and_respond()
-
-    async def stop_listening(self):
-        if not self.recording:
-            return
-        self.recording = False
+    async def stop_ptt(self):
+        self.ptt_active = False
         self.state.assistant_state = "idle"
         await self.state.broadcast_update()
 
+    async def start_listening(self):
+        # This function is now only used to update the UI state
+        pass
+
+    async def stop_listening(self):
+        # This function is now only used to update the UI state
+        pass
+
     async def process_audio(self):
-        silence_frames = 0
-        max_silence_frames = int(1000 / self.frame_duration)  # 1 second silence
-
-        while self.recording:
-            await asyncio.sleep(0.1)  # Check every 100ms
-
-            if len(self.audio_buffer) < self.frame_size:
-                continue
-
-            # Get frame
-            frame = self.audio_buffer[:self.frame_size]
-            self.audio_buffer = self.audio_buffer[self.frame_size:]
-
-            # VAD
-            is_speech = self.vad.is_speech(np.array(frame, dtype=np.int16).tobytes(), self.sample_rate)
-
-            if is_speech:
-                silence_frames = 0
-            else:
-                silence_frames += 1
-
-            # If silence detected and not PTT, stop recording
-            if silence_frames > max_silence_frames and not self.ptt_active:
-                await self.transcribe_and_respond()
-                break
-
-        # For PTT, wait for stop command
-        if self.ptt_active:
-            while self.recording:
-                await asyncio.sleep(0.1)
-            await self.transcribe_and_respond()
+        # This function is now obsolete as the frontend handles audio processing
+        pass
 
     async def transcribe_and_respond(self):
-        if not self.audio_buffer:
-            return
+        # This function is now obsolete as the frontend handles audio processing
+        pass
 
+    async def process_text_command(self, transcript: str):
+        """Processes a text command received from the frontend."""
         self.state.assistant_state = "processing"
         await self.state.broadcast_update()
 
-        # Convert to WAV
-        audio_data = np.array(self.audio_buffer, dtype=np.int16)
-        wav_buffer = io.BytesIO()
-        with wave.open(wav_buffer, 'wb') as wav_file:
-            wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)
-            wav_file.setframerate(self.sample_rate)
-            wav_file.writeframes(audio_data.tobytes())
-        wav_buffer.seek(0)
-
         try:
-            # Simulate STT
-            transcript = "check vitals"  # Simulate user saying "check vitals"
-
             self.state.last_transcript = transcript
             await self.state.broadcast_update()
 
             # LLM for intent (async)
             response = await self.client.chat.completions.create(
-                model="gpt-4",
+                model="gpt-4.1-mini",
                 messages=[
                     {"role": "system", "content": """
 You are a voice assistant for a healthcare robot. Parse the user's speech and respond with STRICT JSON:
@@ -153,29 +103,18 @@ Only output valid JSON, no extra text.
             self.state.last_intent = intent
 
             # Execute intent
+            # This logic should ideally be moved to main.py or a dedicated service
+            # For now, we'll simulate the execution
             if intent in ["check_vitals", "call_nurse", "navigate", "stop", "join_call", "mute_call", "unmute_call", "end_call"]:
                 # Simulate execution (in real, call the functions)
-                pass  # We'll handle in main.py
+                pass
 
-        # TTS (async)
-        self.state.assistant_state = "speaking"
-        await self.state.broadcast_update()
+            # TTS (async)
+            self.state.assistant_state = "speaking"
+            await self.state.broadcast_update()
 
-        # tts_response = await self.client.audio.speech.create(
-        #     model="tts-1",
-        #     voice="alloy",
-        #     input=reply,
-        #     response_format="mp3"
-        # )
-
-        # # Play audio using pydub
-        # audio_data = tts_response.content
-
-        # audio_segment = AudioSegment.from_mp3(io.BytesIO(audio_data))
-        # play(audio_segment)
-
-        # Simulate TTS
-        await asyncio.sleep(2)
+            # Simulate TTS
+            await asyncio.sleep(2)
 
         except Exception as e:
             self.state.last_error = str(e)

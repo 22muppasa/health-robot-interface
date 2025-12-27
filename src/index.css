@@ -137,9 +137,9 @@
     @apply active:scale-95 touch-manipulation;
   }
 
-  /* Card with subtle shadow */
+  /* Responsive card with subtle shadow */
   .dashboard-card {
-    @apply bg-card rounded-xl border border-border shadow-md p-5;
+    @apply bg-card rounded-lg sm:rounded-xl border border-border shadow-sm md:shadow-md p-3 sm:p-4 md:p-5 h-full;
   }
 
   /* Status badge styles */

@@ -1,7 +1,7 @@
 // API configuration and utilities for FastAPI backend communication
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-const WS_BASE_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000';
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
+const WS_BASE_URL = import.meta.env.VITE_WS_URL || '';
 
 // Command structure for robot actions
 export interface RobotCommand {
@@ -35,23 +35,74 @@ export interface TranscriptUpdate {
 // REST API calls
 export const api = {
   // Send a robot command
-  async sendCommand(command: RobotCommand): Promise<{ success: boolean; message: string }> {
-    const response = await fetch(`${API_BASE_URL}/api/command`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        intent: command.intent,
-        slots: command.slots || {},
-        source: command.source || 'ui',
-      }),
-    });
-    return response.json();
+  async sendCommand(command: RobotCommand ): Promise<{ success: boolean; message: string }> {
+    const url = API_BASE_URL ? `${API_BASE_URL}/api/command` : '/api/command';
+    console.log('Sending command to:', url, command);
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          intent: command.intent,
+          slots: command.slots || {},
+          source: command.source || 'ui',
+        }),
+      });
+      console.log('Command response status:', response.status);
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
+      }
+      const result = await response.json();
+      console.log('Command result:', result);
+      return result;
+    } catch (error) {
+      console.error('Command error:', error);
+      throw error;
+    }
+  },
+
+  // New generic POST method for sending data (used for text command)
+  async post(path: string, data: any): Promise<any> {
+    const url = API_BASE_URL ? `${API_BASE_URL}${path}` : path;
+    console.log('Posting to:', url, data);
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+      console.log('Post response status:', response.status);
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
+      }
+      const result = await response.json();
+      console.log('Post result:', result);
+      return result;
+    } catch (error) {
+      console.error('Post error:', error);
+      throw error;
+    }
   },
 
   // Get initial status
   async getStatus(): Promise<SystemStatus> {
-    const response = await fetch(`${API_BASE_URL}/api/status`);
-    return response.json();
+    const url = API_BASE_URL ? `${API_BASE_URL}/api/status` : '/api/status';
+    console.log('Getting status from:', url);
+    try {
+      const response = await fetch(url);
+      console.log('Status response status:', response.status);
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const result = await response.json();
+      console.log('Status result:', result);
+      return result;
+    } catch (error) {
+      console.error('Status error:', error);
+      throw error;
+    }
   },
 };
 
@@ -66,7 +117,18 @@ export class WebSocketManager {
   connect(): void {
     if (this.ws?.readyState === WebSocket.OPEN) return;
 
-    this.ws = new WebSocket(`${WS_BASE_URL}/ws`);
+    // Construct WebSocket URL
+    let wsUrl: string;
+    if (WS_BASE_URL) {
+      wsUrl = `${WS_BASE_URL}/ws`;
+    } else {
+      // Use relative path for proxy
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      wsUrl = `${protocol}//${window.location.host}/ws`;
+    }
+
+    console.log('Connecting to WebSocket:', wsUrl);
+    this.ws = new WebSocket(wsUrl);
 
     this.ws.onopen = () => {
       console.log('WebSocket connected');
@@ -77,6 +139,7 @@ export class WebSocketManager {
     this.ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        console.log('WebSocket message received:', data);
         if (data.type === 'system_update') {
           this.emit('system_status', data.payload);
           this.emit('call_status', { state: data.payload.call_state });

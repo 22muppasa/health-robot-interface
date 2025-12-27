@@ -8,14 +8,13 @@ import os
 from contextlib import asynccontextmanager
 
 # Import our modules
-# from voice_service import VoiceService
 from voice_service import VoiceService
 from conferencing import ConferencingService
 from robot_actions import RobotActions
 
 # Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-JITSI_BASE_URL = os.getenv("JITSI_BASE_URL", "https://meet.jit.si")
+JITSI_BASE_URL = os.getenv("JITSI_BASE_URL", "https://meet.jit.si" )
 DEFAULT_ROOM = os.getenv("DEFAULT_ROOM", "nurse-station")
 
 # Global state
@@ -47,7 +46,6 @@ class SystemState:
 state = SystemState()
 
 # Services
-# voice_service = VoiceService(state, OPENAI_API_KEY)
 voice_service = VoiceService(state, OPENAI_API_KEY)
 conferencing_service = ConferencingService(state, JITSI_BASE_URL)
 robot_actions = RobotActions(state)
@@ -57,6 +55,9 @@ class CommandRequest(BaseModel):
     intent: str
     slots: Optional[Dict[str, Any]] = {}
     source: str = "ui"
+
+class TextCommandRequest(BaseModel):
+    text: str
 
 # Lifespan
 @asynccontextmanager
@@ -135,6 +136,19 @@ async def handle_command(request: CommandRequest):
         await state.broadcast_update()
         return {"success": True, "message": f"Executed {request.intent}"}
 
+    except Exception as e:
+        state.last_error = str(e)
+        await state.broadcast_update()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/text-command")
+async def handle_text_command(request: TextCommandRequest):
+    if not state.assistant_enabled:
+        raise HTTPException(status_code=400, detail="Assistant is not enabled.")
+    
+    try:
+        await voice_service.process_text_command(request.text)
+        return {"success": True, "message": "Text command processed."}
     except Exception as e:
         state.last_error = str(e)
         await state.broadcast_update()

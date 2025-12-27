@@ -23,12 +23,12 @@ const assistantStateColors: Record<SystemStatus['assistant_state'], string> = {
 export function StatusPanel({ status }: StatusPanelProps) {
   return (
     <div className="dashboard-card">
-      <div className="flex items-center gap-3 mb-4">
-        <Activity className="w-5 h-5 text-primary" />
-        <h2 className="text-lg font-semibold text-foreground">System Status</h2>
+      <div className="flex items-center gap-2 sm:gap-3 mb-3 sm:mb-4 min-w-0">
+        <Activity className="w-4 h-4 sm:w-5 sm:h-5 text-primary flex-shrink-0" />
+        <h2 className="text-base sm:text-lg font-semibold text-foreground truncate">System Status</h2>
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 sm:gap-3 md:gap-4">
         {/* Assistant State */}
         <StatusItem
           icon={
@@ -47,7 +47,7 @@ export function StatusPanel({ status }: StatusPanelProps) {
 
         {/* Microphone Status */}
         <StatusItem
-          icon={status.assistant_enabled ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
+          icon={status.assistant_enabled ? <Mic className="w-4 h-4 sm:w-5 sm:h-5" /> : <MicOff className="w-4 h-4 sm:w-5 sm:h-5" />}
           label="Microphone"
           value={status.assistant_enabled ? 'Active' : 'Off'}
           className={status.assistant_enabled ? 'bg-success/15 text-success' : 'bg-muted text-muted-foreground'}
@@ -55,7 +55,7 @@ export function StatusPanel({ status }: StatusPanelProps) {
 
         {/* Camera Status - Placeholder */}
         <StatusItem
-          icon={<CameraOff className="w-5 h-5" />}
+          icon={<CameraOff className="w-4 h-4 sm:w-5 sm:h-5" />}
           label="Camera"
           value="Off"
           className="bg-muted text-muted-foreground"
@@ -63,7 +63,7 @@ export function StatusPanel({ status }: StatusPanelProps) {
 
         {/* Network Status */}
         <StatusItem
-          icon={<Wifi className="w-5 h-5" />}
+          icon={<Wifi className="w-4 h-4 sm:w-5 sm:h-5" />}
           label="Network"
           value="Connected"
           className="bg-success/15 text-success"
@@ -72,17 +72,17 @@ export function StatusPanel({ status }: StatusPanelProps) {
 
       {/* Last Intent */}
       {status.last_intent && (
-        <div className="mt-4 p-3 bg-muted rounded-lg">
+        <div className="mt-3 sm:mt-4 p-2 sm:p-3 bg-muted rounded-lg">
           <p className="text-xs uppercase tracking-wide text-muted-foreground mb-1">Last Intent</p>
-          <p className="text-sm font-medium">{status.last_intent}</p>
+          <p className="text-xs sm:text-sm font-medium truncate">{status.last_intent}</p>
         </div>
       )}
 
       {/* Last Error */}
       {status.last_error && (
-        <div className="mt-4 p-3 bg-destructive/10 rounded-lg">
+        <div className="mt-3 sm:mt-4 p-2 sm:p-3 bg-destructive/10 rounded-lg">
           <p className="text-xs uppercase tracking-wide text-destructive mb-1">Last Error</p>
-          <p className="text-sm text-destructive">{status.last_error}</p>
+          <p className="text-xs sm:text-sm text-destructive truncate">{status.last_error}</p>
         </div>
       )}
     </div>
@@ -99,16 +99,16 @@ interface StatusItemProps {
 
 function StatusItem({ icon, label, value, className, pulse }: StatusItemProps) {
   return (
-    <div className={cn('flex items-center gap-3 p-4 rounded-xl transition-colors', className)}>
-      <div className="relative">
+    <div className={cn('flex items-center gap-2 sm:gap-3 p-2 sm:p-3 md:p-4 rounded-lg sm:rounded-xl transition-colors text-sm md:text-base', className)}>
+      <div className="relative flex-shrink-0">
         {pulse && (
           <span className="absolute inset-0 rounded-full animate-ping opacity-40 bg-current" />
         )}
         {icon}
       </div>
-      <div className="flex flex-col">
-        <span className="text-xs uppercase tracking-wide opacity-70">{label}</span>
-        <span className="font-semibold">{value}</span>
+      <div className="flex flex-col min-w-0">
+        <span className="text-xs uppercase tracking-wide opacity-70 truncate">{label}</span>
+        <span className="font-semibold truncate text-xs md:text-sm">{value}</span>
       </div>
     </div>
   );
