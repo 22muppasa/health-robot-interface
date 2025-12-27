@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Microphone Test</title>
+  <style>
+    body { font-family: Arial; padding: 20px; }
+    .status { padding: 10px; margin: 10px 0; border-radius: 5px; }
+    .success { background: #d4edda; color: #155724; }
+    .error { background: #f8d7da; color: #721c24; }
+    .info { background: #d1ecf1; color: #0c5460; }
+    button { padding: 10px 20px; margin: 5px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>🎤 Microphone Diagnostics</h1>
+  
+  <div id="results"></div>
+  
+  <h2>Tests:</h2>
+  <button onclick="testBrowserSupport()">1. Check Browser Support</button>
+  <button onclick="testMicrophoneAccess()">2. Request Microphone Access</button>
+  <button onclick="testSpeechRecognition()">3. Test Speech Recognition</button>
+  <button onclick="testAudio()">4. Test Audio Playback</button>
+  
+  <script>
+    function log(message, type = 'info') {
+      const results = document.getElementById('results');
+      const div = document.createElement('div');
+      div.className = 'status ' + type;
+      div.textContent = message;
+      results.appendChild(div);
+      console.log(message);
+    }
+
+    function testBrowserSupport() {
+      log('Checking browser support...', 'info');
+      
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        log('✅ Web Speech API is supported', 'success');
+      } else {
+        log('❌ Web Speech API NOT supported. Use Chrome, Firefox, or Edge', 'error');
+        return;
+      }
+
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        log('✅ getUserMedia API is supported', 'success');
+      } else {
+        log('❌ getUserMedia NOT supported', 'error');
+      }
+
+      if (window.speechSynthesis) {
+        log('✅ Speech Synthesis API is supported', 'success');
+      } else {
+        log('⚠️ Speech Synthesis NOT supported (won\'t hear responses)', 'error');
+      }
+    }
+
+    async function testMicrophoneAccess() {
+      log('Requesting microphone access...', 'info');
+      
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        log('✅ Microphone access granted!', 'success');
+        log('✅ Microphone is working and accessible', 'success');
+        
+        // Stop the stream
+        stream.getTracks().forEach(track => track.stop());
+      } catch (error) {
+        log('❌ Microphone access DENIED: ' + error.name, 'error');
+        
+        if (error.name === 'NotAllowedError') {
+          log('FIX: Click the microphone icon in your browser address bar and allow access', 'info');
+        } else if (error.name === 'NotFoundError') {
+          log('FIX: No microphone found. Check system settings', 'info');
+        } else if (error.name === 'NotReadableError') {
+          log('FIX: Another app may be using the microphone. Close other apps and refresh', 'info');
+        }
+      }
+    }
+
+    function testSpeechRecognition() {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        log('❌ Speech Recognition not available', 'error');
+        return;
+      }
+
+      log('Starting speech recognition test...', 'info');
+      log('Please speak something!', 'info');
+      
+      const recognition = new SpeechRecognition();
+      recognition.continuous = false;
+      recognition.interimResults = true;
+      
+      recognition.onstart = () => {
+        log('🎤 Listening... speak now!', 'success');
+      };
+
+      recognition.onresult = (event) => {
+        let transcript = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          transcript += event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            log('✅ Final result: "' + transcript + '"', 'success');
+          }
+        }
+      };
+
+      recognition.onerror = (event) => {
+        log('❌ Error: ' + event.error, 'error');
+        
+        if (event.error === 'audio-capture') {
+          log('FIX: Microphone not accessible. Check permissions', 'info');
+        } else if (event.error === 'network') {
+          log('FIX: Network error. Check internet connection', 'info');
+        } else if (event.error === 'no-speech') {
+          log('No speech detected. Try speaking louder and clearer', 'info');
+        }
+      };
+
+      recognition.onend = () => {
+        log('Recognition ended', 'info');
+      };
+
+      try {
+        recognition.start();
+      } catch (error) {
+        log('❌ Failed to start: ' + error.message, 'error');
+      }
+    }
+
+    function testAudio() {
+      log('Testing audio playback...', 'info');
+      
+      const audio = new Audio();
+      audio.src = 'data:audio/wav;base64,UklGRiYAAABXQVZFZm10IBAAAAABAAEAQB8AAAB9AAACABAAZGF0YQIAAAAAAAA=';
+      
+      audio.onplay = () => {
+        log('✅ Audio playback working', 'success');
+      };
+      
+      audio.onerror = () => {
+        log('❌ Audio playback failed', 'error');
+      };
+      
+      audio.play().catch(err => {
+        log('❌ Error playing audio: ' + err.message, 'error');
+      });
+    }
+
+    // Run initial tests on load
+    window.onload = () => {
+      testBrowserSupport();
+    };
+  </script>
+</body>
+</html>

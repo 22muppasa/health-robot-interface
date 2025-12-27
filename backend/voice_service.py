@@ -8,13 +8,14 @@ import wave
 from pydub import AudioSegment
 from pydub.playback import play
 import json
+import os
 # import sounddevice as sd # Commented out for Codespaces compatibility
 
 class VoiceService:
     def __init__(self, state, api_key: str):
         self.state = state
         self.api_key = api_key
-        self.client = openai.AsyncOpenAI(api_key="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")
+        self.client = openai.AsyncOpenAI(api_key=api_key)
         self.vad = webrtcvad.Vad(3)  # Aggressiveness 0-3
         self.sample_rate = 16000
         self.frame_duration = 30  # ms
@@ -79,7 +80,7 @@ class VoiceService:
 
             # LLM for intent (async)
             response = await self.client.chat.completions.create(
-                model="gpt-4.1-mini",
+                model="gpt-4-mini",
                 messages=[
                     {"role": "system", "content": """
 You are a voice assistant for a healthcare robot. Parse the user's speech and respond with STRICT JSON:
@@ -113,8 +114,9 @@ Only output valid JSON, no extra text.
             self.state.assistant_state = "speaking"
             await self.state.broadcast_update()
 
-            # Simulate TTS
-            await asyncio.sleep(2)
+            # Generate TTS audio (but don't play it - let the frontend handle it)
+            # The reply will be sent to the frontend which will handle TTS
+            await asyncio.sleep(0.5)  # Small delay to simulate processing
 
         except Exception as e:
             self.state.last_error = str(e)
@@ -122,3 +124,18 @@ Only output valid JSON, no extra text.
         finally:
             self.state.assistant_state = "idle"
             await self.state.broadcast_update()
+
+    async def generate_tts(self, text: str) -> bytes:
+        """Generates text-to-speech audio using OpenAI's TTS API."""
+        try:
+            response = await self.client.audio.speech.create(
+                model="tts-1",
+                voice="alloy",
+                input=text,
+            )
+            
+            # Extract audio bytes from response
+            return response.content
+        except Exception as e:
+            print(f"Error generating TTS: {e}")
+            raise

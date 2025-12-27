@@ -1,4 +1,5 @@
 from fastapi import FastAPI, WebSocket, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
@@ -13,7 +14,7 @@ from conferencing import ConferencingService
 from robot_actions import RobotActions
 
 # Configuration
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or "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"
 JITSI_BASE_URL = os.getenv("JITSI_BASE_URL", "https://meet.jit.si" )
 DEFAULT_ROOM = os.getenv("DEFAULT_ROOM", "nurse-station")
 
@@ -58,6 +59,10 @@ class CommandRequest(BaseModel):
 
 class TextCommandRequest(BaseModel):
     text: str
+
+class TTSRequest(BaseModel):
+    text: str
+
 
 # Lifespan
 @asynccontextmanager
@@ -153,6 +158,26 @@ async def handle_text_command(request: TextCommandRequest):
         state.last_error = str(e)
         await state.broadcast_update()
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/tts")
+async def generate_tts(request: TTSRequest):
+    """Generate text-to-speech audio."""
+    if not request.text or not request.text.strip():
+        raise HTTPException(status_code=400, detail="Text cannot be empty.")
+    
+    try:
+        audio_bytes = await voice_service.generate_tts(request.text)
+        return StreamingResponse(
+            iter([audio_bytes]),
+            media_type="audio/mpeg",
+            headers={"Content-Disposition": "inline; filename=response.mp3"}
+        )
+    except Exception as e:
+        print(f"Error generating TTS: {e}")
+        state.last_error = str(e)
+        await state.broadcast_update()
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):

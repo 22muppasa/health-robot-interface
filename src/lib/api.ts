@@ -104,6 +104,30 @@ export const api = {
       throw error;
     }
   },
+
+  // Get text-to-speech audio for a given text
+  async getTTS(text: string): Promise<Blob> {
+    const url = API_BASE_URL ? `${API_BASE_URL}/api/tts` : '/api/tts';
+    console.log('Getting TTS from:', url, text);
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      console.log('TTS response status:', response.status);
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
+      }
+      const blob = await response.blob();
+      console.log('TTS audio blob received:', blob.size, blob.type);
+      return blob;
+    } catch (error) {
+      console.error('TTS error:', error);
+      throw error;
+    }
+  },
 };
 
 // WebSocket connection manager
