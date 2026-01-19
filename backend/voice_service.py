@@ -8,6 +8,8 @@ import wave
 from pydub import AudioSegment
 from pydub.playback import play
 import json
+from conversation_manager import ConversationManager
+import base64
 # import sounddevice as sd # Commented out for Codespaces compatibility
 
 class VoiceService:
@@ -24,6 +26,8 @@ class VoiceService:
         self.ptt_active = False
         self.recording = False
         self.audio_buffer = []
+        # Initialize conversation manager
+        self.conversation_manager = ConversationManager(self.client)
 
     async def start(self):
         pass  # No background task needed
@@ -69,7 +73,7 @@ class VoiceService:
         pass
 
     async def process_text_command(self, transcript: str):
-        """Processes a text command received from the frontend."""
+        """Processes a text command or conversation from the frontend."""
         self.state.assistant_state = "processing"
         await self.state.broadcast_update()
 
@@ -77,48 +81,98 @@ class VoiceService:
             self.state.last_transcript = transcript
             await self.state.broadcast_update()
 
-            # LLM for intent (async)
-            response = await self.client.chat.completions.create(
-                model="gpt-4.1-mini",
-                messages=[
-                    {"role": "system", "content": """
-You are a voice assistant for a healthcare robot. Parse the user's speech and respond with STRICT JSON:
-{
-  "intent": one of [check_vitals, call_nurse, navigate, stop, join_call, mute_call, unmute_call, end_call, explain, unknown],
-  "slots": object with relevant data (e.g. {"destination": "room 101"} for navigate),
-  "confirmation_needed": boolean if action needs confirmation,
-  "assistant_reply": string response to user
-}
-Only output valid JSON, no extra text.
-"""},
-                    {"role": "user", "content": transcript}
-                ]
-            )
-
-            result = json.loads(response.choices[0].message.content)
-            intent = result["intent"]
+            # Use conversation manager to process and determine intent
+            result = await self.conversation_manager.process_message(transcript)
+            
+            intent = result.get("intent", "conversation")
             slots = result.get("slots", {})
-            reply = result["assistant_reply"]
-
+            response = result.get("response", "")
+            should_execute = result.get("should_execute_command", False)
+            
             self.state.last_intent = intent
 
-            # Execute intent
-            # This logic should ideally be moved to main.py or a dedicated service
-            # For now, we'll simulate the execution
-            if intent in ["check_vitals", "call_nurse", "navigate", "stop", "join_call", "mute_call", "unmute_call", "end_call"]:
-                # Simulate execution (in real, call the functions)
-                pass
+            # If it's a recognized command with high confidence, prepare for execution
+            if should_execute and intent in ["check_vitals", "call_nurse", "navigate", "stop", "join_call", "mute_call", "unmute_call", "end_call"]:
+                # Store command info for main.py to handle
+                self.state.pending_command = {
+                    "intent": intent,
+                    "slots": slots
+                }
 
-            # TTS (async)
+            # TTS - generate speech from response
             self.state.assistant_state = "speaking"
             await self.state.broadcast_update()
 
-            # Simulate TTS
-            await asyncio.sleep(2)
+            # Generate audio for the response
+            audio_base64 = await self.text_to_speech(response)
+            self.state.last_audio = audio_base64
+
+            # Store the response for WebSocket broadcast
+            self.state.last_response = response
+            self.state.last_intent = intent
 
         except Exception as e:
             self.state.last_error = str(e)
+            print(f"Error processing command: {e}")
 
         finally:
             self.state.assistant_state = "idle"
             await self.state.broadcast_update()
+
+    async def text_to_speech(self, text: str) -> str:
+        """
+        Convert text to speech using OpenAI TTS API.
+        Returns base64 encoded MP3 audio.
+        Robust error handling and retry logic.
+        """
+        if not text or len(text.strip()) == 0:
+            print("TTS: Empty text provided")
+            return ""
+        
+        # Truncate to OpenAI's actual limit of 4096 characters
+        # This allows much longer responses compared to the old 500 char limit
+        text_to_speak = text[:4000] if len(text) > 4000 else text
+        
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                print(f"TTS: Generating audio for text (attempt {attempt + 1}/{max_retries})")
+                
+                response = await self.client.audio.speech.create(
+                    model="tts-1",
+                    voice="alloy",
+                    input=text_to_speak,
+                    response_format="mp3"
+                )
+                
+                # Verify we got content
+                if not response or not response.content:
+                    print(f"TTS: Empty response from API (attempt {attempt + 1})")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(1)
+                        continue
+                    return ""
+                
+                # Convert to base64
+                audio_bytes = response.content
+                audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+                
+                # Verify base64 is not empty
+                if not audio_base64:
+                    print(f"TTS: Failed to encode audio to base64 (attempt {attempt + 1})")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(1)
+                        continue
+                    return ""
+                
+                print(f"TTS: Successfully generated audio ({len(audio_bytes)} bytes)")
+                return audio_base64
+                
+            except Exception as e:
+                print(f"TTS Error (attempt {attempt + 1}/{max_retries}): {str(e)}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1)
+                    continue
+                return ""
+        
+        return ""

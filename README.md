@@ -5,6 +5,11 @@ A full-stack application for controlling a healthcare robot with voice assistant
 ## Features
 
 - **Voice Assistant**: Always-on VAD with push-to-talk mode using OpenAI STT/TTS
+- **Real-Time Conversational AI** ✨ NEW: Claire understands both commands and natural conversations
+  - Intent detection with confidence scoring
+  - Seamless command execution
+  - Empathetic nursing-style responses
+  - Real-time response streaming
 - **Video Conferencing**: Join Jitsi calls via Chromium kiosk
 - **Robot Actions**: Check vitals, call nurse, navigate, stop
 - **Real-time Updates**: WebSocket for live status updates
@@ -43,6 +48,17 @@ cp ../.env.example ../.env
 ```bash
 npm install
 ```
+
+## Documentation
+
+### Quick Start
+- **[Quick Reference](QUICK_REFERENCE.md)** - Commands, examples, and tips
+- **[Conversational AI Guide](CONVERSATION_AI_GUIDE.md)** - Complete feature documentation
+
+### Technical Docs
+- **[Implementation Summary](IMPLEMENTATION_SUMMARY.md)** - What was added and how
+- **[Architecture](ARCHITECTURE.md)** - System design and data flows
+- **[Verification](VERIFICATION.md)** - Implementation checklist
 
 ## Running
 

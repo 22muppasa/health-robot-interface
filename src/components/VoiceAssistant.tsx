@@ -1,12 +1,15 @@
 // src/components/VoiceAssistant.tsx
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { MessageSquare, Mic } from 'lucide-react';
+import { MessageSquare, Mic, MessageCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/components/ui/use-toast';
 import { useSimpleWakeWord } from '@/hooks/useSimpleWakeWord';
+import { useConversation } from '@/hooks/useConversation';
+import { ConversationDisplay } from '@/components/ConversationDisplay';
 
 // Define the SpeechRecognition interface for TypeScript
 declare global {
@@ -32,11 +35,13 @@ export function VoiceAssistant({
   const [wakeWordMode, setWakeWordMode] = useState(false);
   const [wakeWordDetected, setWakeWordDetected] = useState(false);
   const [isProcessingCommand, setIsProcessingCommand] = useState(false);
+  const [activeTab, setActiveTab] = useState('voice');
 
   // This ref is used for the *command* recognizer (wake-word command + PTT)
   const commandRecognitionRef = useRef<any>(null);
 
   const { toast } = useToast();
+  const { messages, isWaiting, sendMessage, cancelMessage, clearMessages, isPlayingAudio } = useConversation();
 
   /**
    * Auto command recognition (used after wake word)
@@ -80,6 +85,21 @@ export function VoiceAssistant({
         try {
           await api.post('/api/text-command', { text: transcript });
           console.log('Command sent successfully:', transcript);
+          
+          // After a brief delay, try to play audio response
+          setTimeout(async () => {
+            try {
+              const audioResponse = await fetch('/api/audio/last');
+              if (audioResponse.ok) {
+                const blob = await audioResponse.blob();
+                const audioUrl = URL.createObjectURL(blob);
+                const audio = new Audio(audioUrl);
+                audio.play().catch(err => console.log('Audio playback skipped:', err));
+              }
+            } catch (err) {
+              console.log('Audio playback not available:', err);
+            }
+          }, 200);
         } catch (error) {
           console.error('Failed to send text command:', error);
           toast({
@@ -228,6 +248,21 @@ export function VoiceAssistant({
       if (transcript) {
         try {
           await api.post('/api/text-command', { text: transcript });
+          
+          // After a brief delay, try to play audio response
+          setTimeout(async () => {
+            try {
+              const audioResponse = await fetch('/api/audio/last');
+              if (audioResponse.ok) {
+                const blob = await audioResponse.blob();
+                const audioUrl = URL.createObjectURL(blob);
+                const audio = new Audio(audioUrl);
+                audio.play().catch(err => console.log('Audio playback skipped:', err));
+              }
+            } catch (err) {
+              console.log('Audio playback not available:', err);
+            }
+          }, 200);
         } catch (error) {
           console.error('Failed to send text command:', error);
           toast({
@@ -296,103 +331,132 @@ export function VoiceAssistant({
         </div>
       </div>
 
-      {/* Wake Word Mode Toggle */}
-      <div className="flex items-center justify-between mb-4 p-2 sm:p-3 bg-muted rounded-lg">
-        <div className="flex items-center gap-2">
-          <span className="text-xs sm:text-sm font-medium">Wake Word Mode</span>
+      {/* Tabs for Voice and Conversation */}
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+        <TabsList className="grid w-full grid-cols-2 mb-4">
+          <TabsTrigger value="voice" className="flex items-center gap-2">
+            <Mic className="w-4 h-4" />
+            <span className="hidden sm:inline">Voice</span>
+          </TabsTrigger>
+          <TabsTrigger value="chat" className="flex items-center gap-2">
+            <MessageCircle className="w-4 h-4" />
+            <span className="hidden sm:inline">Chat</span>
+          </TabsTrigger>
+        </TabsList>
 
-          {isWakeWordListening && !isProcessingCommand && (
-            <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-500 opacity-75" />
-              <span className="relative inline-flex rounded-full h-full w-full bg-green-500" />
-            </span>
-          )}
+        {/* Voice Mode Tab */}
+        <TabsContent value="voice">
+          {/* Wake Word Mode Toggle */}
+          <div className="flex items-center justify-between mb-4 p-2 sm:p-3 bg-muted rounded-lg">
+            <div className="flex items-center gap-2">
+              <span className="text-xs sm:text-sm font-medium">Wake Word Mode</span>
 
-          {isProcessingCommand && (
-            <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-500 opacity-75" />
-              <span className="relative inline-flex rounded-full h-full w-full bg-blue-500" />
-            </span>
-          )}
-        </div>
+              {isWakeWordListening && !isProcessingCommand && (
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-500 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-full w-full bg-green-500" />
+                </span>
+              )}
 
-        <Switch checked={wakeWordMode} onCheckedChange={setWakeWordMode} disabled={!isEnabled} />
-      </div>
+              {isProcessingCommand && (
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-500 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-full w-full bg-blue-500" />
+                </span>
+              )}
+            </div>
 
-      {/* Wake Word Status */}
-      {wakeWordMode && isEnabled && (
-        <div className="mb-4 p-2 sm:p-3 bg-primary/10 rounded-lg border border-primary/20">
-          <p className="text-xs sm:text-sm text-center">
-            {isProcessingCommand ? (
-              <span className="font-semibold text-blue-500 animate-pulse">
-                🎤 Listening for command...
-              </span>
-            ) : wakeWordDetected ? (
-              <span className="font-semibold text-primary animate-pulse">✓ Wake word detected!</span>
-            ) : (
-              <span className="text-muted-foreground">
-                Say <span className="font-semibold text-primary">"Claire"</span> to activate
-              </span>
-            )}
-          </p>
+            <Switch checked={wakeWordMode} onCheckedChange={setWakeWordMode} disabled={!isEnabled} />
+          </div>
 
-          {/* Debug: Show what's being heard */}
-          {wakeWordTranscript && !isProcessingCommand && (
-            <p className="text-xs text-center mt-1 text-muted-foreground">
-              Heard: "{wakeWordTranscript}"
-            </p>
-          )}
-        </div>
-      )}
+          {/* Wake Word Status */}
+          {wakeWordMode && isEnabled && (
+            <div className="mb-4 p-2 sm:p-3 bg-primary/10 rounded-lg border border-primary/20">
+              <p className="text-xs sm:text-sm text-center">
+                {isProcessingCommand ? (
+                  <span className="font-semibold text-blue-500 animate-pulse">
+                    🎤 Listening for command...
+                  </span>
+                ) : wakeWordDetected ? (
+                  <span className="font-semibold text-primary animate-pulse">✓ Wake word detected!</span>
+                ) : (
+                  <span className="text-muted-foreground">
+                    Say <span className="font-semibold text-primary">"Claire"</span> to activate
+                  </span>
+                )}
+              </p>
 
-      {/* Push-to-Talk Button (shown when wake word mode is off) */}
-      {!wakeWordMode && (
-        <div className="flex flex-col items-center mb-4 sm:mb-6">
-          <Button
-            variant={isPushToTalkActive ? 'default' : 'outline'}
-            size="touch-lg"
-            className={cn(
-              'w-24 h-24 sm:w-32 sm:h-32 rounded-full flex flex-col gap-1 sm:gap-2 transition-all text-xs sm:text-sm',
-              isPushToTalkActive && 'ring-4 ring-primary/30 scale-105',
-              !isEnabled && 'opacity-50 cursor-not-allowed'
-            )}
-            disabled={!isEnabled}
-            onMouseDown={handlePushToTalkStart}
-            onMouseUp={handlePushToTalkEnd}
-            onMouseLeave={handlePushToTalkEnd}
-            onTouchStart={handlePushToTalkStart}
-            onTouchEnd={handlePushToTalkEnd}
-          >
-            <Mic className={cn('w-6 h-6 sm:w-10 sm:h-10', isPushToTalkActive && 'animate-pulse')} />
-            <span className="text-xs sm:text-sm leading-tight">Hold to Talk</span>
-          </Button>
-
-          {isListening && (
-            <div className="mt-3 sm:mt-4 flex items-center gap-2 text-info">
-              <span className="relative flex h-2 w-2 sm:h-3 sm:w-3">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-info opacity-75" />
-                <span className="relative inline-flex rounded-full h-full w-full bg-info" />
-              </span>
-              <span className="text-xs sm:text-sm font-medium">Listening...</span>
+              {/* Debug: Show what's being heard */}
+              {wakeWordTranscript && !isProcessingCommand && (
+                <p className="text-xs text-center mt-1 text-muted-foreground">
+                  Heard: "{wakeWordTranscript}"
+                </p>
+              )}
             </div>
           )}
-        </div>
-      )}
 
-      {/* Transcript Display */}
-      <div className="bg-muted rounded-lg sm:rounded-xl p-2 sm:p-4">
-        <p className="text-xs uppercase tracking-wide text-muted-foreground mb-1 sm:mb-2">
-          Last Command
-        </p>
-        <p
-          className={cn(
-            'text-xs sm:text-sm md:text-base min-h-[40px] sm:min-h-[48px] break-words',
-            !lastTranscript && 'text-muted-foreground italic'
+          {/* Push-to-Talk Button (shown when wake word mode is off) */}
+          {!wakeWordMode && (
+            <div className="flex flex-col items-center mb-4 sm:mb-6">
+              <Button
+                variant={isPushToTalkActive ? 'default' : 'outline'}
+                size="touch-lg"
+                className={cn(
+                  'w-24 h-24 sm:w-32 sm:h-32 rounded-full flex flex-col gap-1 sm:gap-2 transition-all text-xs sm:text-sm',
+                  isPushToTalkActive && 'ring-4 ring-primary/30 scale-105',
+                  !isEnabled && 'opacity-50 cursor-not-allowed'
+                )}
+                disabled={!isEnabled}
+                onMouseDown={handlePushToTalkStart}
+                onMouseUp={handlePushToTalkEnd}
+                onMouseLeave={handlePushToTalkEnd}
+                onTouchStart={handlePushToTalkStart}
+                onTouchEnd={handlePushToTalkEnd}
+              >
+                <Mic className={cn('w-6 h-6 sm:w-10 sm:h-10', isPushToTalkActive && 'animate-pulse')} />
+                <span className="text-xs sm:text-sm leading-tight">Hold to Talk</span>
+              </Button>
+
+              {isListening && (
+                <div className="mt-3 sm:mt-4 flex items-center gap-2 text-info">
+                  <span className="relative flex h-2 w-2 sm:h-3 sm:w-3">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-info opacity-75" />
+                    <span className="relative inline-flex rounded-full h-full w-full bg-info" />
+                  </span>
+                  <span className="text-xs sm:text-sm font-medium">Listening...</span>
+                </div>
+              )}
+            </div>
           )}
-        >
-          {lastTranscript || 'No commands yet...'}
-        </p>
-      </div>
+
+          {/* Transcript Display */}
+          <div className="bg-muted rounded-lg sm:rounded-xl p-2 sm:p-4">
+            <p className="text-xs uppercase tracking-wide text-muted-foreground mb-1 sm:mb-2">
+              Last Command
+            </p>
+            <p
+              className={cn(
+                'text-xs sm:text-sm md:text-base min-h-[40px] sm:min-h-[48px] break-words',
+                !lastTranscript && 'text-muted-foreground italic'
+              )}
+            >
+              {lastTranscript || 'No commands yet...'}
+            </p>
+          </div>
+        </TabsContent>
+
+        {/* Chat Mode Tab */}
+        <TabsContent value="chat" className="h-full">
+          <ConversationDisplay
+            messages={messages}
+            isWaiting={isWaiting}
+            onSend={sendMessage}
+            onCancel={cancelMessage}
+            disabled={!isEnabled}
+            isPlayingAudio={isPlayingAudio}
+          />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
