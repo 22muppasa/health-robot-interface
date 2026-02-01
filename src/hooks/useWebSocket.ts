@@ -1,11 +1,24 @@
 import { useEffect, useState, useCallback } from 'react';
 import { wsManager, SystemStatus, CallStatus, TranscriptUpdate } from '@/lib/api';
 
+interface PendingCommand {
+  intent: string;
+  slots?: Record<string, string>;
+}
+
+interface ActiveCallInfo {
+  call_id?: string;
+  room_id?: string;
+  contact_name?: string;
+}
+
 interface WebSocketState {
   connected: boolean;
   systemStatus: SystemStatus;
   callStatus: CallStatus;
   lastTranscript: string;
+  pendingCommand: PendingCommand | null;
+  activeCallInfo: ActiveCallInfo | null;
 }
 
 const defaultSystemStatus: SystemStatus = {
@@ -13,6 +26,8 @@ const defaultSystemStatus: SystemStatus = {
   assistant_state: 'idle',
   last_transcript: '',
   last_intent: '',
+  last_response: '',
+  last_audio: '',
   call_state: 'not_in_call',
   last_error: '',
 };
@@ -27,6 +42,8 @@ export function useWebSocket() {
     systemStatus: defaultSystemStatus,
     callStatus: defaultCallStatus,
     lastTranscript: '',
+    pendingCommand: null,
+    activeCallInfo: null,
   });
 
   useEffect(() => {
@@ -43,12 +60,17 @@ export function useWebSocket() {
     });
 
     const unsubStatus = wsManager.on('system_status', (data) => {
-      const status = data as SystemStatus;
+      const status = data as SystemStatus & { 
+        pending_command?: PendingCommand;
+        active_call_info?: ActiveCallInfo;
+      };
       setState((prev) => ({
         ...prev,
         systemStatus: status,
         lastTranscript: status.last_transcript,
         callStatus: { state: status.call_state as CallStatus['state'] },
+        pendingCommand: status.pending_command || null,
+        activeCallInfo: status.active_call_info || null,
       }));
     });
 
@@ -85,5 +107,12 @@ export function useWebSocket() {
     }));
   }, []);
 
-  return { ...state, updateStatus };
+  const clearPendingCommand = useCallback(() => {
+    setState((prev) => ({
+      ...prev,
+      pendingCommand: null,
+    }));
+  }, []);
+
+  return { ...state, updateStatus, clearPendingCommand };
 }

@@ -16,6 +16,8 @@ export interface SystemStatus {
   assistant_state: 'idle' | 'listening' | 'processing' | 'speaking';
   last_transcript: string;
   last_intent: string;
+  last_response?: string;
+  last_audio?: string;
   call_state: 'not_in_call' | 'connecting' | 'in_call';
   last_error: string;
 }
@@ -62,8 +64,9 @@ export const api = {
     }
   },
 
-  // New generic POST method for sending data (used for text command)
-  async post(path: string, data: any): Promise<any> {
+  // Generic POST method for sending data
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async post(path: string, data: Record<string, unknown>): Promise<any> {
     const url = API_BASE_URL ? `${API_BASE_URL}${path}` : path;
     console.log('Posting to:', url, data);
     try {
@@ -82,6 +85,30 @@ export const api = {
       return result;
     } catch (error) {
       console.error('Post error:', error);
+      throw error;
+    }
+  },
+
+  // Generic GET method for fetching data
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async get(path: string): Promise<any> {
+    const url = API_BASE_URL ? `${API_BASE_URL}${path}` : path;
+    console.log('Getting from:', url);
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      console.log('Get response status:', response.status);
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
+      }
+      const result = await response.json();
+      console.log('Get result:', result);
+      return result;
+    } catch (error) {
+      console.error('Get error:', error);
       throw error;
     }
   },

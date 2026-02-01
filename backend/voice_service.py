@@ -16,7 +16,7 @@ class VoiceService:
     def __init__(self, state, api_key: str):
         self.state = state
         self.api_key = api_key
-        self.client = openai.AsyncOpenAI(api_key="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")
+        self.client = openai.AsyncOpenAI(api_key=api_key)
         self.vad = webrtcvad.Vad(3)  # Aggressiveness 0-3
         self.sample_rate = 16000
         self.frame_duration = 30  # ms
@@ -92,7 +92,17 @@ class VoiceService:
             self.state.last_intent = intent
 
             # If it's a recognized command with high confidence, prepare for execution
-            if should_execute and intent in ["check_vitals", "call_nurse", "navigate", "stop", "join_call", "mute_call", "unmute_call", "end_call"]:
+            # Expanded list of commands that can be voice-triggered
+            executable_commands = {
+                "check_vitals", "call_nurse", "navigate", "stop", 
+                "join_call", "mute_call", "unmute_call", "end_call",
+                "pain_assessment", "mood_check", "medication_reminder",
+                "room_service", "health_tips", "medication_taken",
+                "call_family", "call_contact", "emergency", "set_reminder", "list_reminders",
+                "switch_mode", "show_contacts", "add_contact", "remove_contact", "cancel_reminder"
+            }
+            
+            if should_execute and intent in executable_commands:
                 # Store command info for main.py to handle
                 self.state.pending_command = {
                     "intent": intent,

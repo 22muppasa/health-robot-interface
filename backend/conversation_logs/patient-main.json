@@ -1,0 +1,29 @@
+{
+  "patient_id": "patient-main",
+  "messages": [
+    {
+      "id": "user-1769954749106",
+      "role": "user",
+      "content": "Hello Claire, how are you?",
+      "timestamp": "2026-02-01T14:05:49.106987"
+    },
+    {
+      "id": "assistant-1769954754374",
+      "role": "assistant",
+      "content": "Hello! I am doing well, thank you for asking. How can I help you today?",
+      "timestamp": "2026-02-01T14:05:54.374083"
+    },
+    {
+      "id": "user-1769955111567",
+      "role": "user",
+      "content": "Show my reminders",
+      "timestamp": "2026-02-01T14:11:51.567868"
+    },
+    {
+      "id": "assistant-1769955113287",
+      "role": "assistant",
+      "content": "{\n  \"intent\": \"list_reminders\",\n  \"confidence\": 0.95,\n  \"slots\": {},\n  \"should_execute_command\": true,\n  \"response\": \"Let me check your reminders.\"\n}",
+      "timestamp": "2026-02-01T14:11:53.287422"
+    }
+  ]
+}

@@ -75,7 +75,7 @@ export function RobotActions() {
   };
 
   return (
-    <div className="dashboard-card">
+    <div className="dashboard-card flex flex-col h-full">
       <div className="flex items-center gap-2 sm:gap-3 mb-4 sm:mb-6 min-w-0">
         <Bot className="w-4 h-4 sm:w-5 sm:h-5 text-primary flex-shrink-0" />
         <h2 className="text-base sm:text-lg font-semibold text-foreground truncate">Robot Actions</h2>

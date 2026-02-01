@@ -5,3 +5,7 @@ openai
 webrtcvad
 numpy
 pydub
+aiohttp
+sqlalchemy
+python-dotenv
+python-multipart

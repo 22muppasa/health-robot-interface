@@ -22,7 +22,7 @@ const assistantStateColors: Record<SystemStatus['assistant_state'], string> = {
 
 export function StatusPanel({ status }: StatusPanelProps) {
   return (
-    <div className="dashboard-card">
+    <div className="dashboard-card flex flex-col h-full">
       <div className="flex items-center gap-2 sm:gap-3 mb-3 sm:mb-4 min-w-0">
         <Activity className="w-4 h-4 sm:w-5 sm:h-5 text-primary flex-shrink-0" />
         <h2 className="text-base sm:text-lg font-semibold text-foreground truncate">System Status</h2>

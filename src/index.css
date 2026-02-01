@@ -139,7 +139,7 @@
 
   /* Responsive card with subtle shadow */
   .dashboard-card {
-    @apply bg-card rounded-lg sm:rounded-xl border border-border shadow-sm md:shadow-md p-3 sm:p-4 md:p-5 h-full;
+    @apply bg-card rounded-lg sm:rounded-xl border border-border shadow-sm md:shadow-md p-2 sm:p-3 md:p-4 h-full overflow-y-auto;
   }
 
   /* Status badge styles */
