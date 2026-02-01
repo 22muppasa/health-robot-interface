@@ -41,9 +41,11 @@ import {
   RefreshCw,
   AlertCircle,
   CheckCircle,
+  MessageSquare,
 } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
 import { cn } from '@/lib/utils';
+import { wsManager, ConversationUpdate } from '@/lib/api';
 
 interface FamilySession {
   token: string;
@@ -57,6 +59,7 @@ interface PatientStatus {
   name: string;
   isOnline: boolean;
   lastSeen: string;
+  deviceId: string | null;
   vitals: {
     heartRate: number;
     bloodPressure: string;
@@ -67,6 +70,25 @@ interface PatientStatus {
   mood: string;
   painLevel: number;
   lastMedication: string;
+}
+
+interface CallHistoryEntry {
+  id: string;
+  caller_name: string;
+  patient_name: string;
+  started_at: string;
+  ended_at: string | null;
+  duration_seconds: number;
+  status: 'completed' | 'missed' | 'rejected' | 'failed';
+  direction: 'incoming' | 'outgoing';
+}
+
+interface ActivityLogEntry {
+  id: string;
+  action: string;
+  description: string;
+  timestamp: string;
+  category: 'command' | 'reminder' | 'call' | 'system';
 }
 
 interface Reminder {
@@ -85,6 +107,14 @@ interface EmergencyContact {
   relationship: string;
   phone: string;
   isEmergency: boolean;
+}
+
+interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+  intent?: string;
 }
 
 export default function FamilyPortal() {
@@ -109,6 +139,30 @@ export default function FamilyPortal() {
   const [newReminder, setNewReminder] = useState(false);
   const [editingContact, setEditingContact] = useState<EmergencyContact | null>(null);
   const [newContact, setNewContact] = useState(false);
+
+  // Conversation state
+  const [conversationMessages, setConversationMessages] = useState<ChatMessage[]>([]);
+  const [loadingConversation, setLoadingConversation] = useState(false);
+  const [hasNewMessages, setHasNewMessages] = useState(false);
+  const conversationEndRef = useRef<HTMLDivElement>(null);
+
+  // Settings state
+  const [patientSettings, setPatientSettings] = useState({
+    wake_word_sensitivity: 'medium',
+    voice_speed: 'normal',
+    auto_answer_family_calls: false,
+    quiet_hours_start: '22:00',
+    quiet_hours_end: '08:00',
+  });
+  const [savingSettings, setSavingSettings] = useState(false);
+
+  // Call history and activity log
+  const [callHistory, setCallHistory] = useState<CallHistoryEntry[]>([]);
+  const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>([]);
+  const [missedCallsCount, setMissedCallsCount] = useState(0);
+  const [loadingCallHistory, setLoadingCallHistory] = useState(false);
+  const [loadingActivityLog, setLoadingActivityLog] = useState(false);
+  const [currentCallId, setCurrentCallId] = useState<string | null>(null);
 
   // Video refs
   const localVideoRef = useRef<HTMLVideoElement>(null);
@@ -149,7 +203,76 @@ export default function FamilyPortal() {
     loadPatientStatus();
     loadReminders();
     loadContacts();
+    loadConversationHistory();
+    loadPatientSettings();
+    loadCallHistory();
+    loadActivityLog();
   }, [session]);
+
+  // Subscribe to real-time conversation updates
+  useEffect(() => {
+    if (!session) return;
+
+    // Connect to WebSocket if not already connected
+    wsManager.connect();
+
+    // Listen for conversation updates
+    const unsubscribeConversation = wsManager.on('conversation_update', (data) => {
+      const update = data as ConversationUpdate;
+      // Only show messages for our patient
+      if (update.patient_id === session.patientId || update.patient_id === 'patient-main') {
+        setConversationMessages((prev) => {
+          // Check if message already exists (avoid duplicates)
+          if (prev.some((m) => m.id === update.message.id)) {
+            return prev;
+          }
+          return [...prev, update.message];
+        });
+        // Mark as having new messages if not on conversation tab
+        if (activeTab !== 'conversation') {
+          setHasNewMessages(true);
+        }
+      }
+    });
+
+    // Listen for call events (answered, rejected, missed)
+    const unsubscribeSystem = wsManager.on('system_update', (data) => {
+      const payload = (data as { payload?: { call_event?: { type: string; call_id: string } } }).payload;
+      if (payload?.call_event && currentCallId) {
+        const event = payload.call_event;
+        if (event.call_id === currentCallId) {
+          if (event.type === 'call_rejected') {
+            toast({
+              title: 'Call Declined',
+              description: `${patientStatus?.name || 'The patient'} declined your call`,
+            });
+            setCallState('idle');
+            setCurrentCallId(null);
+            loadCallHistory(); // Refresh call history
+          } else if (event.type === 'call_answered') {
+            // Call was answered - connection will proceed
+            toast({
+              title: 'Call Answered',
+              description: 'Connecting...',
+            });
+          }
+        }
+      }
+    });
+
+    return () => {
+      unsubscribeConversation();
+      unsubscribeSystem();
+    };
+  }, [session, activeTab, currentCallId, patientStatus?.name, toast]);
+
+  // Auto-scroll conversation to bottom when new messages arrive
+  useEffect(() => {
+    if (activeTab === 'conversation') {
+      conversationEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      setHasNewMessages(false);
+    }
+  }, [conversationMessages, activeTab]);
 
   // Call duration timer
   useEffect(() => {
@@ -161,19 +284,41 @@ export default function FamilyPortal() {
   }, [callState]);
 
   const loadPatientStatus = async () => {
+    if (!session) return;
     try {
-      // Get patient profile
-      const profileRes = await fetch('/api/user-profile');
-      const profileData = await profileRes.json();
+      // Get patient data from Supabase via backend
+      const patientRes = await fetch(`/api/patient/${session.patientId}/status`);
+      
+      let patientData = null;
+      let isOnline = false;
+      let lastSeen = 'Unknown';
+      let deviceId = null;
+      let patientName = 'Patient';
+
+      if (patientRes.ok) {
+        patientData = await patientRes.json();
+        isOnline = patientData.is_online ?? false;
+        lastSeen = patientData.last_seen ? new Date(patientData.last_seen).toLocaleString() : 'Unknown';
+        deviceId = patientData.device_id || null;
+        patientName = patientData.name || 'Patient';
+      } else {
+        // Fallback to user-profile
+        const profileRes = await fetch('/api/user-profile');
+        if (profileRes.ok) {
+          const profileData = await profileRes.json();
+          patientName = profileData.profile?.name || 'Patient';
+        }
+      }
 
       // Get robot status for vitals
       const statusRes = await fetch('/api/robot-status');
-      const statusData = await statusRes.json();
+      const statusData = statusRes.ok ? await statusRes.json() : {};
 
       setPatientStatus({
-        name: profileData.profile?.name || 'Patient',
-        isOnline: true, // In a real app, check WebSocket connection
-        lastSeen: new Date().toLocaleString(),
+        name: patientName,
+        isOnline,
+        lastSeen,
+        deviceId,
         vitals: {
           heartRate: statusData.vitals?.heart_rate || 72,
           bloodPressure: statusData.vitals?.blood_pressure || '120/80',
@@ -187,11 +332,11 @@ export default function FamilyPortal() {
       });
     } catch (error) {
       console.error('Failed to load patient status:', error);
-      // Use mock data
       setPatientStatus({
         name: 'Patient',
-        isOnline: true,
-        lastSeen: new Date().toLocaleString(),
+        isOnline: false,
+        lastSeen: 'Unknown',
+        deviceId: null,
         vitals: {
           heartRate: 72,
           bloodPressure: '120/80',
@@ -203,6 +348,43 @@ export default function FamilyPortal() {
         painLevel: 0,
         lastMedication: 'Not recorded',
       });
+    }
+  };
+
+  const loadCallHistory = async () => {
+    if (!session) return;
+    setLoadingCallHistory(true);
+    try {
+      const res = await fetch(`/api/family/call-history/${session.patientId}`);
+      if (res.ok) {
+        const data = await res.json();
+        setCallHistory(data.calls || []);
+        // Count unviewed missed calls
+        const missed = (data.calls || []).filter(
+          (c: CallHistoryEntry) => c.status === 'missed' && !c.ended_at
+        ).length;
+        setMissedCallsCount(missed);
+      }
+    } catch (error) {
+      console.error('Failed to load call history:', error);
+    } finally {
+      setLoadingCallHistory(false);
+    }
+  };
+
+  const loadActivityLog = async () => {
+    if (!session) return;
+    setLoadingActivityLog(true);
+    try {
+      const res = await fetch(`/api/family/activity-log/${session.patientId}?limit=50`);
+      if (res.ok) {
+        const data = await res.json();
+        setActivityLog(data.activities || []);
+      }
+    } catch (error) {
+      console.error('Failed to load activity log:', error);
+    } finally {
+      setLoadingActivityLog(false);
     }
   };
 
@@ -228,6 +410,94 @@ export default function FamilyPortal() {
     }
   };
 
+  const loadConversationHistory = async () => {
+    if (!session) return;
+    setLoadingConversation(true);
+    try {
+      const patientId = session.patientId || 'patient-main';
+      const res = await fetch(`/api/chat-history/${patientId}?limit=100`);
+      if (res.ok) {
+        const data = await res.json();
+        setConversationMessages(data.messages || []);
+      }
+    } catch (error) {
+      console.error('Failed to load conversation history:', error);
+    } finally {
+      setLoadingConversation(false);
+    }
+  };
+
+  const loadPatientSettings = async () => {
+    if (!session) return;
+    try {
+      const patientId = session.patientId || 'patient-main';
+      const res = await fetch(`/api/patient-settings/${patientId}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.settings) {
+          setPatientSettings({
+            wake_word_sensitivity: data.settings.wake_word_sensitivity || 'medium',
+            voice_speed: data.settings.voice_speed || 'normal',
+            auto_answer_family_calls: data.settings.auto_answer_family_calls || false,
+            quiet_hours_start: data.settings.quiet_hours_start || '22:00',
+            quiet_hours_end: data.settings.quiet_hours_end || '08:00',
+          });
+        }
+      }
+    } catch (error) {
+      console.error('Failed to load patient settings:', error);
+    }
+  };
+
+  const savePatientSettings = async () => {
+    if (!session) return;
+    setSavingSettings(true);
+    try {
+      const patientId = session.patientId || 'patient-main';
+      const res = await fetch('/api/patient-settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          patient_id: patientId,
+          ...patientSettings,
+        }),
+      });
+      if (res.ok) {
+        toast({
+          title: 'Settings Saved',
+          description: 'Patient preferences have been updated',
+        });
+      } else {
+        throw new Error('Failed to save settings');
+      }
+    } catch (error) {
+      console.error('Failed to save patient settings:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to save settings. Please try again.',
+        variant: 'destructive',
+      });
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  const formatMessageTimestamp = (timestamp: string) => {
+    const date = new Date(timestamp);
+    const now = new Date();
+    const diffDays = Math.floor((now.getTime() - date.getTime()) / (1000 * 60 * 60 * 24));
+
+    if (diffDays === 0) {
+      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    } else if (diffDays === 1) {
+      return 'Yesterday ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    } else if (diffDays < 7) {
+      return date.toLocaleDateString([], { weekday: 'short' }) + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    } else {
+      return date.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+  };
+
   const handleLogout = () => {
     if (callState !== 'idle') {
       endCall();
@@ -249,13 +519,30 @@ export default function FamilyPortal() {
   // === VIDEO CALL FUNCTIONS ===
   const initiateCall = async () => {
     if (!session || !patientStatus) return;
+
+    // Check if patient is online first
+    if (!patientStatus.isOnline) {
+      toast({
+        title: 'Patient Offline',
+        description: `${patientStatus.name} appears to be offline. Last seen: ${patientStatus.lastSeen}`,
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    // Check if device is paired
+    if (!patientStatus.deviceId) {
+      toast({
+        title: 'No Device Paired',
+        description: 'The patient has no device paired. They need to pair a device first.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
     setCallState('calling');
 
     try {
-      const callId = `call-${Date.now()}`;
-      const newRoomId = `family-call-${callId}`;
-      setRoomId(newRoomId);
-
       // Initiate call via backend
       const response = await fetch('/api/calls/initiate', {
         method: 'POST',
@@ -269,10 +556,23 @@ export default function FamilyPortal() {
         }),
       });
 
-      if (!response.ok) throw new Error('Failed to initiate call');
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        const errorMessage = errorData.detail || 'Failed to initiate call';
+        
+        // Provide specific error messages
+        if (response.status === 503) {
+          throw new Error('Patient device is not connected. Please try again later.');
+        } else if (response.status === 404) {
+          throw new Error('Patient not found. Please check the connection.');
+        } else {
+          throw new Error(errorMessage);
+        }
+      }
 
       const callData = await response.json();
       setRoomId(callData.room_id);
+      setCurrentCallId(callData.call_id);
 
       toast({
         title: 'Calling...',
@@ -283,12 +583,31 @@ export default function FamilyPortal() {
       pollCallStatus(callData.call_id);
     } catch (error) {
       console.error('Failed to initiate call:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Could not reach the patient';
+      
+      // Log failed call attempt
+      try {
+        await fetch('/api/family/log-call', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            patient_id: session.patientId,
+            caller_name: session.name,
+            status: 'failed',
+            error: errorMessage,
+          }),
+        });
+      } catch (logError) {
+        console.error('Failed to log call:', logError);
+      }
+
       toast({
         title: 'Call Failed',
-        description: 'Could not reach the patient',
+        description: errorMessage,
         variant: 'destructive',
       });
       setCallState('idle');
+      setCurrentCallId(null);
     }
   };
 
@@ -513,6 +832,27 @@ export default function FamilyPortal() {
       }
     }
 
+    // Log completed call to history
+    if (currentCallId && session) {
+      try {
+        await fetch('/api/family/log-call', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            call_id: currentCallId,
+            patient_id: session.patientId,
+            caller_name: session.name,
+            status: 'completed',
+            duration_seconds: callDuration,
+          }),
+        });
+        // Refresh call history
+        loadCallHistory();
+      } catch (error) {
+        console.error('Error logging call:', error);
+      }
+    }
+
     toast({
       title: 'Call Ended',
       description: `Duration: ${Math.floor(callDuration / 60)}m ${callDuration % 60}s`,
@@ -522,6 +862,7 @@ export default function FamilyPortal() {
     setCallDuration(0);
     setRoomId(null);
     setParticipantId(null);
+    setCurrentCallId(null);
     setIsMuted(false);
     setIsVideoOff(false);
   };
@@ -776,11 +1117,11 @@ export default function FamilyPortal() {
         {/* Patient Status Card */}
         <Card className="bg-white/80 dark:bg-gray-800/80 backdrop-blur">
           <CardContent className="p-4">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between flex-wrap gap-4">
               <div className="flex items-center gap-4">
                 <div
                   className={cn(
-                    'w-16 h-16 rounded-full flex items-center justify-center',
+                    'w-16 h-16 rounded-full flex items-center justify-center relative',
                     patientStatus?.isOnline
                       ? 'bg-green-100 dark:bg-green-900'
                       : 'bg-gray-100 dark:bg-gray-800'
@@ -794,37 +1135,86 @@ export default function FamilyPortal() {
                         : 'text-gray-400'
                     )}
                   />
+                  {/* Online indicator dot */}
+                  <div
+                    className={cn(
+                      'absolute bottom-0 right-0 w-4 h-4 rounded-full border-2 border-white dark:border-gray-800',
+                      patientStatus?.isOnline ? 'bg-green-500' : 'bg-gray-400'
+                    )}
+                  />
                 </div>
                 <div>
                   <h2 className="text-xl font-bold">{patientStatus?.name}</h2>
                   <div className="flex items-center gap-2 mt-1">
-                    <div
-                      className={cn(
-                        'w-2 h-2 rounded-full',
-                        patientStatus?.isOnline ? 'bg-green-500' : 'bg-gray-400'
-                      )}
-                    />
-                    <span className="text-sm text-muted-foreground">
+                    <span className={cn(
+                      'text-sm font-medium',
+                      patientStatus?.isOnline ? 'text-green-600 dark:text-green-400' : 'text-muted-foreground'
+                    )}>
                       {patientStatus?.isOnline ? 'Online' : 'Offline'}
                     </span>
+                    {!patientStatus?.isOnline && patientStatus?.lastSeen && (
+                      <span className="text-xs text-muted-foreground">
+                        • Last seen: {patientStatus.lastSeen}
+                      </span>
+                    )}
                   </div>
+                  {!patientStatus?.deviceId && (
+                    <p className="text-xs text-amber-600 dark:text-amber-400 mt-1 flex items-center gap-1">
+                      <AlertCircle className="w-3 h-3" />
+                      No device paired
+                    </p>
+                  )}
                 </div>
               </div>
 
-              <Button size="lg" onClick={initiateCall} disabled={!patientStatus?.isOnline} className="gap-2">
-                <Video className="w-5 h-5" />
-                Call Now
-              </Button>
+              <div className="flex items-center gap-3">
+                {/* Quick stats */}
+                <div className="hidden sm:flex items-center gap-4 mr-4 text-sm">
+                  <div className="text-center">
+                    <Heart className="w-4 h-4 mx-auto text-red-500" />
+                    <span className="text-xs text-muted-foreground">{patientStatus?.vitals.heartRate} bpm</span>
+                  </div>
+                  <div className="text-center">
+                    <Smile className="w-4 h-4 mx-auto text-yellow-500" />
+                    <span className="text-xs text-muted-foreground">{patientStatus?.mood}</span>
+                  </div>
+                </div>
+                <Button 
+                  size="lg" 
+                  onClick={initiateCall} 
+                  disabled={!patientStatus?.isOnline || !patientStatus?.deviceId} 
+                  className="gap-2"
+                >
+                  <Video className="w-5 h-5" />
+                  Call Now
+                </Button>
+              </div>
             </div>
           </CardContent>
         </Card>
 
         {/* Main Tabs */}
         <Tabs value={activeTab} onValueChange={setActiveTab}>
-          <TabsList className="grid grid-cols-5 w-full">
+          <TabsList className="grid grid-cols-7 w-full">
             <TabsTrigger value="call" className="gap-1">
               <Phone className="w-4 h-4" />
               <span className="hidden sm:inline">Call</span>
+            </TabsTrigger>
+            <TabsTrigger value="history" className="gap-1 relative">
+              <Clock className="w-4 h-4" />
+              <span className="hidden sm:inline">History</span>
+              {missedCallsCount > 0 && (
+                <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] bg-red-500 text-white text-xs rounded-full flex items-center justify-center">
+                  {missedCallsCount}
+                </span>
+              )}
+            </TabsTrigger>
+            <TabsTrigger value="conversation" className="gap-1 relative">
+              <MessageSquare className="w-4 h-4" />
+              <span className="hidden sm:inline">Chat</span>
+              {hasNewMessages && (
+                <span className="absolute -top-1 -right-1 w-2 h-2 bg-red-500 rounded-full animate-pulse" />
+              )}
             </TabsTrigger>
             <TabsTrigger value="status" className="gap-1">
               <Activity className="w-4 h-4" />
@@ -881,8 +1271,206 @@ export default function FamilyPortal() {
             </Card>
           </TabsContent>
 
+          {/* Call History Tab */}
+          <TabsContent value="history" className="mt-4">
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between pb-3">
+                <div>
+                  <CardTitle className="flex items-center gap-2">
+                    <Clock className="w-5 h-5 text-primary" />
+                    Call History
+                  </CardTitle>
+                  <CardDescription>
+                    Recent calls with {patientStatus?.name}
+                  </CardDescription>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={loadCallHistory}
+                  disabled={loadingCallHistory}
+                >
+                  <RefreshCw className={cn('w-4 h-4 mr-1', loadingCallHistory && 'animate-spin')} />
+                  Refresh
+                </Button>
+              </CardHeader>
+              <CardContent>
+                {loadingCallHistory ? (
+                  <div className="flex items-center justify-center py-12">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
+                  </div>
+                ) : callHistory.length === 0 ? (
+                  <div className="text-center py-12 text-muted-foreground">
+                    <Phone className="w-16 h-16 mx-auto mb-4 opacity-30" />
+                    <p className="text-lg font-medium mb-2">No call history yet</p>
+                    <p className="text-sm">
+                      Your calls with {patientStatus?.name || 'the patient'} will appear here.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-3 max-h-[500px] overflow-y-auto">
+                    {callHistory.map((call) => (
+                      <div
+                        key={call.id}
+                        className={cn(
+                          'flex items-center justify-between p-3 rounded-lg border transition-colors',
+                          call.status === 'completed' && 'bg-green-50 dark:bg-green-950/30 border-green-200 dark:border-green-900',
+                          call.status === 'missed' && 'bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-900',
+                          call.status === 'rejected' && 'bg-orange-50 dark:bg-orange-950/30 border-orange-200 dark:border-orange-900',
+                          call.status === 'failed' && 'bg-gray-50 dark:bg-gray-900/30 border-gray-200 dark:border-gray-800',
+                        )}
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className={cn(
+                            'w-10 h-10 rounded-full flex items-center justify-center',
+                            call.status === 'completed' && 'bg-green-100 dark:bg-green-900',
+                            call.status === 'missed' && 'bg-red-100 dark:bg-red-900',
+                            call.status === 'rejected' && 'bg-orange-100 dark:bg-orange-900',
+                            call.status === 'failed' && 'bg-gray-100 dark:bg-gray-800',
+                          )}>
+                            {call.status === 'completed' ? (
+                              <CheckCircle className="w-5 h-5 text-green-600 dark:text-green-400" />
+                            ) : call.status === 'missed' ? (
+                              <Phone className="w-5 h-5 text-red-600 dark:text-red-400" />
+                            ) : call.status === 'rejected' ? (
+                              <PhoneOff className="w-5 h-5 text-orange-600 dark:text-orange-400" />
+                            ) : (
+                              <AlertCircle className="w-5 h-5 text-gray-600 dark:text-gray-400" />
+                            )}
+                          </div>
+                          <div>
+                            <p className="font-medium">
+                              {call.direction === 'incoming' ? `From ${call.caller_name}` : `To ${patientStatus?.name || 'Patient'}`}
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                              {new Date(call.started_at).toLocaleString()}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <span className={cn(
+                            'px-2 py-1 rounded-full text-xs font-medium',
+                            call.status === 'completed' && 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300',
+                            call.status === 'missed' && 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300',
+                            call.status === 'rejected' && 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300',
+                            call.status === 'failed' && 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300',
+                          )}>
+                            {call.status === 'completed' ? 'Completed' : 
+                             call.status === 'missed' ? 'Missed' : 
+                             call.status === 'rejected' ? 'Declined' : 'Failed'}
+                          </span>
+                          {call.status === 'completed' && call.duration_seconds > 0 && (
+                            <p className="text-xs text-muted-foreground mt-1">
+                              {Math.floor(call.duration_seconds / 60)}m {call.duration_seconds % 60}s
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          {/* Conversation Tab - Real-time chat history */}
+          <TabsContent value="conversation" className="mt-4">
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between pb-3">
+                <div>
+                  <CardTitle className="flex items-center gap-2">
+                    <MessageSquare className="w-5 h-5 text-primary" />
+                    Live Conversation
+                  </CardTitle>
+                  <CardDescription>
+                    Real-time view of {patientStatus?.name}'s conversations with Claire
+                  </CardDescription>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={loadConversationHistory}
+                  disabled={loadingConversation}
+                >
+                  <RefreshCw className={cn('w-4 h-4 mr-1', loadingConversation && 'animate-spin')} />
+                  Refresh
+                </Button>
+              </CardHeader>
+              <CardContent>
+                {loadingConversation ? (
+                  <div className="flex items-center justify-center py-12">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
+                  </div>
+                ) : conversationMessages.length === 0 ? (
+                  <div className="text-center py-12 text-muted-foreground">
+                    <MessageSquare className="w-16 h-16 mx-auto mb-4 opacity-30" />
+                    <p className="text-lg font-medium mb-2">No conversations yet</p>
+                    <p className="text-sm">
+                      When {patientStatus?.name || 'the patient'} talks to Claire, you'll see the conversation here in real-time.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-4 max-h-[500px] overflow-y-auto pr-2">
+                    {conversationMessages.map((message) => (
+                      <div
+                        key={message.id}
+                        className={cn(
+                          'flex flex-col gap-1 p-3 rounded-lg transition-all',
+                          message.role === 'user'
+                            ? 'bg-blue-50 dark:bg-blue-950/50 ml-8 border-l-4 border-blue-400'
+                            : 'bg-pink-50 dark:bg-pink-950/50 mr-8 border-l-4 border-pink-400'
+                        )}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            {message.role === 'user' ? (
+                              <User className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                            ) : (
+                              <Heart className="w-4 h-4 text-pink-600 dark:text-pink-400" />
+                            )}
+                            <span
+                              className={cn(
+                                'text-xs font-semibold uppercase tracking-wide',
+                                message.role === 'user'
+                                  ? 'text-blue-600 dark:text-blue-400'
+                                  : 'text-pink-600 dark:text-pink-400'
+                              )}
+                            >
+                              {message.role === 'user' ? patientStatus?.name || 'Patient' : 'Claire'}
+                            </span>
+                          </div>
+                          <span className="text-xs text-muted-foreground flex items-center gap-1">
+                            <Clock className="w-3 h-3" />
+                            {formatMessageTimestamp(message.timestamp)}
+                          </span>
+                        </div>
+                        <p className="text-sm leading-relaxed mt-1">{message.content}</p>
+                        {message.intent && message.intent !== 'conversation' && (
+                          <span className="text-xs text-muted-foreground mt-1 flex items-center gap-1">
+                            <Activity className="w-3 h-3" />
+                            Action: {message.intent.replace(/_/g, ' ')}
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                    <div ref={conversationEndRef} />
+                  </div>
+                )}
+
+                {/* Live indicator */}
+                <div className="mt-4 pt-4 border-t flex items-center justify-center gap-2 text-sm text-muted-foreground">
+                  <span className="relative flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
+                  </span>
+                  Live - Updates appear automatically
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
           {/* Status Tab */}
-          <TabsContent value="status" className="mt-4">
+          <TabsContent value="status" className="mt-4 space-y-4">
             <div className="grid md:grid-cols-2 gap-4">
               <Card>
                 <CardHeader>
@@ -937,6 +1525,71 @@ export default function FamilyPortal() {
                 </CardContent>
               </Card>
             </div>
+
+            {/* Activity Log */}
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between pb-3">
+                <div>
+                  <CardTitle className="flex items-center gap-2">
+                    <Activity className="w-5 h-5 text-purple-500" />
+                    Recent Activity
+                  </CardTitle>
+                  <CardDescription>
+                    Commands and actions performed by {patientStatus?.name}
+                  </CardDescription>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={loadActivityLog}
+                  disabled={loadingActivityLog}
+                >
+                  <RefreshCw className={cn('w-4 h-4 mr-1', loadingActivityLog && 'animate-spin')} />
+                  Refresh
+                </Button>
+              </CardHeader>
+              <CardContent>
+                {loadingActivityLog ? (
+                  <div className="flex items-center justify-center py-8">
+                    <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary" />
+                  </div>
+                ) : activityLog.length === 0 ? (
+                  <div className="text-center py-8 text-muted-foreground">
+                    <Activity className="w-12 h-12 mx-auto mb-3 opacity-30" />
+                    <p className="text-sm">No recent activity to display</p>
+                  </div>
+                ) : (
+                  <div className="space-y-2 max-h-[300px] overflow-y-auto">
+                    {activityLog.map((activity) => (
+                      <div
+                        key={activity.id}
+                        className="flex items-center gap-3 p-2 rounded-lg bg-muted/50 hover:bg-muted transition-colors"
+                      >
+                        <div className={cn(
+                          'w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0',
+                          activity.category === 'command' && 'bg-blue-100 dark:bg-blue-900',
+                          activity.category === 'reminder' && 'bg-yellow-100 dark:bg-yellow-900',
+                          activity.category === 'call' && 'bg-green-100 dark:bg-green-900',
+                          activity.category === 'system' && 'bg-gray-100 dark:bg-gray-800',
+                        )}>
+                          {activity.category === 'command' && <MessageSquare className="w-4 h-4 text-blue-600 dark:text-blue-400" />}
+                          {activity.category === 'reminder' && <Bell className="w-4 h-4 text-yellow-600 dark:text-yellow-400" />}
+                          {activity.category === 'call' && <Phone className="w-4 h-4 text-green-600 dark:text-green-400" />}
+                          {activity.category === 'system' && <Settings className="w-4 h-4 text-gray-600 dark:text-gray-400" />}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium truncate">{activity.action}</p>
+                          <p className="text-xs text-muted-foreground truncate">{activity.description}</p>
+                        </div>
+                        <span className="text-xs text-muted-foreground flex-shrink-0">
+                          {new Date(activity.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
           </TabsContent>
 
           {/* Reminders Tab */}
@@ -1102,18 +1755,26 @@ export default function FamilyPortal() {
               <CardContent className="space-y-4">
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Wake Word Sensitivity</label>
-                  <select className="w-full px-3 py-2 border rounded-md">
+                  <select
+                    className="w-full px-3 py-2 border rounded-md"
+                    value={patientSettings.wake_word_sensitivity}
+                    onChange={(e) => setPatientSettings({ ...patientSettings, wake_word_sensitivity: e.target.value })}
+                  >
                     <option value="low">Low (louder voice needed)</option>
-                    <option value="medium" selected>Medium (balanced)</option>
+                    <option value="medium">Medium (balanced)</option>
                     <option value="high">High (more sensitive)</option>
                   </select>
                 </div>
 
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Voice Speed</label>
-                  <select className="w-full px-3 py-2 border rounded-md">
+                  <select
+                    className="w-full px-3 py-2 border rounded-md"
+                    value={patientSettings.voice_speed}
+                    onChange={(e) => setPatientSettings({ ...patientSettings, voice_speed: e.target.value })}
+                  >
                     <option value="slow">Slow</option>
-                    <option value="normal" selected>Normal</option>
+                    <option value="normal">Normal</option>
                     <option value="fast">Fast</option>
                   </select>
                 </div>
@@ -1121,7 +1782,12 @@ export default function FamilyPortal() {
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Auto-Answer Calls From Family</label>
                   <label className="flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" className="w-4 h-4 rounded" />
+                    <input
+                      type="checkbox"
+                      className="w-4 h-4 rounded"
+                      checked={patientSettings.auto_answer_family_calls}
+                      onChange={(e) => setPatientSettings({ ...patientSettings, auto_answer_family_calls: e.target.checked })}
+                    />
                     <span className="text-sm">Automatically answer after 10 seconds</span>
                   </label>
                 </div>
@@ -1129,13 +1795,29 @@ export default function FamilyPortal() {
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Quiet Hours</label>
                   <div className="flex gap-2">
-                    <Input type="time" defaultValue="22:00" className="flex-1" />
+                    <Input
+                      type="time"
+                      value={patientSettings.quiet_hours_start}
+                      onChange={(e) => setPatientSettings({ ...patientSettings, quiet_hours_start: e.target.value })}
+                      className="flex-1"
+                    />
                     <span className="flex items-center text-muted-foreground">to</span>
-                    <Input type="time" defaultValue="08:00" className="flex-1" />
+                    <Input
+                      type="time"
+                      value={patientSettings.quiet_hours_end}
+                      onChange={(e) => setPatientSettings({ ...patientSettings, quiet_hours_end: e.target.value })}
+                      className="flex-1"
+                    />
                   </div>
                 </div>
 
-                <Button className="w-full mt-4">Save Preferences</Button>
+                <Button
+                  className="w-full mt-4"
+                  onClick={savePatientSettings}
+                  disabled={savingSettings}
+                >
+                  {savingSettings ? 'Saving...' : 'Save Preferences'}
+                </Button>
               </CardContent>
             </Card>
           </TabsContent>

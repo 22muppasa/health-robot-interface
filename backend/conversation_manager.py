@@ -11,12 +11,14 @@ class ConversationManager:
     Distinguishes between commands and casual conversation.
     """
 
-    def __init__(self, client):
+    def __init__(self, client, patient_id: str = "patient-main"):
         self.client = client
         self.conversation_history: List[Dict[str, str]] = []
         self.context = {
             "patient_name": "Patient",
-            "patient_id": "patient-main",  # Default patient ID for persistence
+            "patient_id": patient_id,  # Configurable patient ID for persistence
+            "room_number": None,
+            "contacts": [],
             "last_vitals_check": None,
             "current_location": "Unknown",
             "active_call": False,
@@ -25,7 +27,64 @@ class ConversationManager:
             "pain_level": None,
             "last_meal": None,
         }
-        self.system_prompt = """You are Claire, a compassionate healthcare assistant robot. You combine the expertise of a seasoned nurse with empathetic, personalized care.
+        self._base_system_prompt = self._build_base_system_prompt()
+        self.system_prompt = self._build_personalized_prompt()
+
+    def set_patient_context(self, context: Dict[str, Any]):
+        """Update patient context and rebuild system prompt."""
+        if context.get("patient_name"):
+            self.context["patient_name"] = context["patient_name"]
+        if context.get("patient_id"):
+            self.context["patient_id"] = context["patient_id"]
+        if context.get("room_number"):
+            self.context["room_number"] = context["room_number"]
+        if context.get("contacts"):
+            self.context["contacts"] = context["contacts"]
+        
+        # Rebuild the personalized prompt with new context
+        self.system_prompt = self._build_personalized_prompt()
+
+    def _build_personalized_prompt(self) -> str:
+        """Build system prompt with patient-specific information."""
+        prompt = self._base_system_prompt
+        
+        # Add personalization section
+        patient_name = self.context.get("patient_name", "Patient")
+        room_number = self.context.get("room_number")
+        contacts = self.context.get("contacts", [])
+        
+        personalization = f"""
+
+## CURRENT PATIENT CONTEXT:
+You are currently assisting {patient_name}."""
+        
+        if room_number:
+            personalization += f" They are in room {room_number}."
+        
+        if contacts:
+            contact_list = []
+            for c in contacts:
+                name = c.get("name", "Unknown")
+                relationship = c.get("relationship")
+                is_emergency = c.get("is_emergency")
+                desc = name
+                if relationship:
+                    desc += f" ({relationship})"
+                if is_emergency:
+                    desc += " [Emergency Contact]"
+                contact_list.append(desc)
+            personalization += f"\n\nTheir contacts are: {', '.join(contact_list)}"
+        
+        personalization += f"""
+
+IMPORTANT: When the patient asks "what is my name" or "who am I", respond with "{patient_name}".
+When they ask about their contacts, refer to the contacts listed above.
+Always address the patient warmly by name when appropriate."""
+        
+        return prompt + personalization
+
+    def _build_base_system_prompt(self) -> str:
+        return """You are Claire, a compassionate healthcare assistant robot. You combine the expertise of a seasoned nurse with empathetic, personalized care.
 
 ## Your Personality:
 - Warm, professional, and reassuring like a trusted nurse
@@ -90,6 +149,11 @@ You can recognize and execute these commands:
   * Examples: "switch to face mode", "go to sleep mode", "show ambient display", "photo frame mode", "chat mode", "companion mode", "emergency mode"
   * Trigger phrases: "switch to [mode]", "go to [mode] mode", "show [mode]", "[mode] mode please", "display [mode]"
 
+### Device & Family Commands:
+- generate_invite_code: Generate a 6-digit pairing code so family members can connect their devices
+  * Trigger phrases: "give me a code", "generate a code", "family code", "pairing code", "invite code", "connect family", "add family member"
+  * Response: Provide the 6-digit code and explain it expires in 24 hours
+
 ## Enhanced Nurse Features:
 When to use specific commands:
 1. **pain_assessment** - User says: "I'm in pain", "It hurts", "I have an ache"
@@ -98,6 +162,8 @@ When to use specific commands:
 4. **show_contacts** - User asks: "Who can I call?", "Show my contacts", "List contacts"
 5. **add_contact** - User says: "Add contact [name]", "Save [name] as a contact"
 6. **cancel_reminder** - User says: "Cancel my reminder", "Delete the medication reminder"
+7. **generate_invite_code** - User asks for a code to share with family: "give me a code", "pairing code", "family code", "connect family", "invite code"
+   * CRITICAL: For this command, the actual code is generated by the system AFTER you set should_execute_command=true. Your response should say you're generating a code, not include a made-up code.
 
 ## Response Format:
 Always respond with valid JSON in this format:
@@ -118,6 +184,8 @@ Always respond with valid JSON in this format:
 - User: "Cancel my medication reminder" → intent: "cancel_reminder", confidence: 0.95, slots: {"reminder_text": "medication"}
 - User: "Call Mom" → intent: "call_contact", confidence: 0.95, slots: {"contact_name": "Mom"}, response: "Calling Mom now..."
 - User: "Turn off the camera" → intent: "toggle_camera", confidence: 0.95, slots: {"camera_on": false}, response: "Turning off your camera."
+- User: "Give me a code for my family" → intent: "generate_invite_code", confidence: 0.95, response: "I'll generate a pairing code for your family."
+- User: "Generate a pairing code" → intent: "generate_invite_code", confidence: 0.95, response: "Here's your family pairing code."
 - User: "Mute" → intent: "mute_call", confidence: 0.95, response: "Muting your microphone."
 - User: "End the call" → intent: "end_call", confidence: 0.95, response: "Ending the call now."
 - User: "Answer" → intent: "answer_call", confidence: 0.95, response: "Answering the call."
@@ -214,6 +282,21 @@ Always respond with valid JSON in this format:
                     "should_execute_command": True,
                     "response": mode_responses.get(detected_mode, f"Switching to {detected_mode} mode.")
                 }
+        
+        # Direct detection for generate_invite_code - bypass AI for clear requests
+        invite_code_phrases = [
+            "give me a code", "generate a code", "pairing code", "family code",
+            "invite code", "code for my family", "code for family", "connect family",
+            "add family member", "give me a pairing", "invitation code", "get a code"
+        ]
+        if any(phrase in user_lower for phrase in invite_code_phrases):
+            return {
+                "intent": "generate_invite_code",
+                "confidence": 0.99,
+                "slots": {},
+                "should_execute_command": True,
+                "response": "I'll generate a pairing code for your family."
+            }
         
         # Check if user is asking about weather
         weather_keywords = ["weather", "rain", "snow", "temperature", "temp", "forecast", "cloudy", "sunny", "wind", "humidity"]
@@ -379,9 +462,20 @@ IMPORTANT: This is REAL, current weather data. Provide these exact values in you
                 "content": full_response
             })
             
-            # Persist assistant response
+            # Extract clean response text from JSON if the AI returned structured JSON
+            clean_response = full_response
             try:
-                persist_message(patient_id, "assistant", full_response)
+                # Check if response is JSON and extract the 'response' field
+                parsed = json.loads(full_response)
+                if isinstance(parsed, dict) and "response" in parsed:
+                    clean_response = parsed["response"]
+            except json.JSONDecodeError:
+                # Not JSON, use the raw response (this is fine for conversational responses)
+                pass
+            
+            # Persist assistant response (clean version)
+            try:
+                persist_message(patient_id, "assistant", clean_response)
             except Exception as e:
                 print(f"Warning: Failed to persist assistant message: {e}")
 

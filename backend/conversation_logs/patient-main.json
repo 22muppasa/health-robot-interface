@@ -24,6 +24,30 @@
       "role": "assistant",
       "content": "{\n  \"intent\": \"list_reminders\",\n  \"confidence\": 0.95,\n  \"slots\": {},\n  \"should_execute_command\": true,\n  \"response\": \"Let me check your reminders.\"\n}",
       "timestamp": "2026-02-01T14:11:53.287422"
+    },
+    {
+      "id": "user-1769977693476",
+      "role": "user",
+      "content": "what's my name",
+      "timestamp": "2026-02-01T20:28:13.476490"
+    },
+    {
+      "id": "assistant-1769977695600",
+      "role": "assistant",
+      "content": "I don't have your name yet. Could you please share it with me?",
+      "timestamp": "2026-02-01T20:28:15.600051"
+    },
+    {
+      "id": "user-1769978545641",
+      "role": "user",
+      "content": "Hello Claire",
+      "timestamp": "2026-02-01T20:42:25.641507"
+    },
+    {
+      "id": "assistant-1769978546298",
+      "role": "assistant",
+      "content": "Hello! It's nice to see you. How can I assist you today?",
+      "timestamp": "2026-02-01T20:42:26.298322"
     }
   ]
 }

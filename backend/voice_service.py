@@ -9,11 +9,12 @@ from pydub import AudioSegment
 from pydub.playback import play
 import json
 from conversation_manager import ConversationManager
+from supabase_client import PatientDB, ContactsDB, is_supabase_configured
 import base64
 # import sounddevice as sd # Commented out for Codespaces compatibility
 
 class VoiceService:
-    def __init__(self, state, api_key: str):
+    def __init__(self, state, api_key: str, patient_id: str = "patient-main"):
         self.state = state
         self.api_key = api_key
         self.client = openai.AsyncOpenAI(api_key=api_key)
@@ -26,8 +27,64 @@ class VoiceService:
         self.ptt_active = False
         self.recording = False
         self.audio_buffer = []
-        # Initialize conversation manager
-        self.conversation_manager = ConversationManager(self.client)
+        # Initialize conversation manager with configurable patient ID
+        self.patient_id = patient_id
+        self.conversation_manager = ConversationManager(self.client, patient_id=patient_id)
+        # Cache for patient context to avoid repeated lookups
+        self._patient_context_cache = {}
+
+    async def load_patient_context(self, patient_id: str):
+        """Load patient context from database and update conversation manager."""
+        if not patient_id or patient_id == "patient-main":
+            return
+        
+        # Check cache first (cache for 5 minutes)
+        import time
+        cache_key = patient_id
+        cached = self._patient_context_cache.get(cache_key)
+        if cached and time.time() - cached.get("timestamp", 0) < 300:
+            self.conversation_manager.set_patient_context(cached["context"])
+            return
+        
+        if not is_supabase_configured():
+            return
+        
+        try:
+            # Fetch patient data
+            patient = await PatientDB.get_by_id(patient_id)
+            if not patient:
+                return
+            
+            # Fetch contacts
+            contacts = await ContactsDB.get_all(patient_id)
+            
+            # Build context
+            context = {
+                "patient_name": patient.get("name", "Patient"),
+                "patient_id": patient_id,
+                "room_number": patient.get("room_number"),
+                "contacts": [
+                    {"name": c.get("name"), "relationship": c.get("relationship"), "is_emergency": c.get("is_emergency_contact")}
+                    for c in contacts
+                ] if contacts else []
+            }
+            
+            # Cache the context
+            self._patient_context_cache[cache_key] = {
+                "context": context,
+                "timestamp": time.time()
+            }
+            
+            # Update conversation manager
+            self.conversation_manager.set_patient_context(context)
+            
+        except Exception as e:
+            print(f"Error loading patient context: {e}")
+
+    def set_patient_id(self, patient_id: str):
+        """Update the patient ID for conversation persistence."""
+        self.patient_id = patient_id
+        self.conversation_manager.update_context("patient_id", patient_id)
 
     async def start(self):
         pass  # No background task needed
@@ -57,27 +114,54 @@ class VoiceService:
         await self.state.broadcast_update()
 
     async def start_listening(self):
-        # This function is now only used to update the UI state
-        pass
+        """
+        Legacy method - audio processing now handled by frontend.
+        
+        The frontend uses Web Speech API for speech recognition.
+        This method is kept for API compatibility.
+        """
+        self.state.assistant_state = "listening"
+        await self.state.broadcast_update()
 
     async def stop_listening(self):
-        # This function is now only used to update the UI state
-        pass
+        """
+        Legacy method - audio processing now handled by frontend.
+        
+        The frontend uses Web Speech API for speech recognition.
+        This method is kept for API compatibility.
+        """
+        self.state.assistant_state = "idle"
+        await self.state.broadcast_update()
 
     async def process_audio(self):
-        # This function is now obsolete as the frontend handles audio processing
+        """
+        Legacy method - audio processing now handled by frontend.
+        
+        The frontend captures audio and converts to text via Web Speech API,
+        then sends transcripts to process_text_command().
+        This method is kept for future hardware audio input support.
+        """
         pass
 
     async def transcribe_and_respond(self):
-        # This function is now obsolete as the frontend handles audio processing
+        """
+        Legacy method - transcription now handled by frontend.
+        
+        Use process_text_command() for processing text from frontend.
+        This method is kept for future hardware audio input support.
+        """
         pass
 
-    async def process_text_command(self, transcript: str):
+    async def process_text_command(self, transcript: str, patient_id: str = None):
         """Processes a text command or conversation from the frontend."""
         self.state.assistant_state = "processing"
         await self.state.broadcast_update()
 
         try:
+            # Load patient context if provided
+            if patient_id:
+                await self.load_patient_context(patient_id)
+            
             self.state.last_transcript = transcript
             await self.state.broadcast_update()
 
@@ -96,10 +180,12 @@ class VoiceService:
             executable_commands = {
                 "check_vitals", "call_nurse", "navigate", "stop", 
                 "join_call", "mute_call", "unmute_call", "end_call",
+                "answer_call", "reject_call", "toggle_camera",
                 "pain_assessment", "mood_check", "medication_reminder",
                 "room_service", "health_tips", "medication_taken",
                 "call_family", "call_contact", "emergency", "set_reminder", "list_reminders",
-                "switch_mode", "show_contacts", "add_contact", "remove_contact", "cancel_reminder"
+                "switch_mode", "show_contacts", "add_contact", "remove_contact", "cancel_reminder",
+                "generate_invite_code"
             }
             
             if should_execute and intent in executable_commands:

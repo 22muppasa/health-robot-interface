@@ -11,17 +11,25 @@ import { useWebSocket } from '@/hooks/useWebSocket';
 import { useSimpleWakeWord } from '@/hooks/useSimpleWakeWord';
 import { useConversation } from '@/hooks/useConversation';
 import { useMode, type ClaireMode, MODE_INFO } from '@/hooks/useMode';
+import { usePatientIdentity } from '@/hooks/usePatientIdentity';
+import DevicePairingScreen from '@/components/DevicePairingScreen';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/components/ui/use-toast';
 import { cn } from '@/lib/utils';
 import { Phone, AlertTriangle, HelpCircle, Users, X, Mic, Bell, Clock } from 'lucide-react';
 
+// Check if device pairing is required (can be disabled for development)
+const REQUIRE_PAIRING = import.meta.env.VITE_REQUIRE_PAIRING !== 'false';
+
 const Index = () => {
   const { systemStatus, pendingCommand, activeCallInfo, clearPendingCommand } = useWebSocket();
+  const { identity, isPaired, isLoading: isIdentityLoading } = usePatientIdentity();
   const [incomingCall, setIncomingCall] = useState<{ call_id?: string; caller_name?: string; initiator_name?: string; initiator_role?: string; room_id?: string; patientId?: string } | null>(null);
   const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
   const [isCallActive, setIsCallActive] = useState(false);
+  const [isCallMuted, setIsCallMuted] = useState(false);
+  const [isCallVideoOff, setIsCallVideoOff] = useState(false);
   const [callerName, setCallerName] = useState<string>('Family');
   const [showIncomingDialog, setShowIncomingDialog] = useState(false);
   const [showClaireFullScreen, setShowClaireFullScreen] = useState(false);
@@ -555,6 +563,164 @@ const Index = () => {
     }
   }, [pendingCommand, clearPendingCommand, toast, playAudio, systemStatus.last_audio, setMode]);
 
+  // Handle show_contacts command from voice
+  useEffect(() => {
+    if (pendingCommand && pendingCommand.intent === 'show_contacts') {
+      const commandId = `show-contacts-${Date.now()}`;
+      
+      if (processedCommandRef.current === commandId) return;
+      processedCommandRef.current = commandId;
+      
+      setShowContactsModal(true);
+      
+      // Play the audio response if available
+      if (systemStatus.last_audio) {
+        playAudio(systemStatus.last_audio);
+      }
+      
+      // Clear pending command
+      clearPendingCommand();
+      api.post('/api/clear-pending-command', {}).catch(() => {});
+    }
+  }, [pendingCommand, clearPendingCommand, playAudio, systemStatus.last_audio]);
+
+  // Handle end_call command from voice
+  useEffect(() => {
+    if (pendingCommand && pendingCommand.intent === 'end_call') {
+      const commandId = `end-call-${Date.now()}`;
+      
+      if (processedCommandRef.current === commandId) return;
+      processedCommandRef.current = commandId;
+      
+      // End the active call
+      if (isCallActive) {
+        setIsCallActive(false);
+        setActiveRoomId(null);
+        setCallerName('Family');
+        
+        toast({
+          title: 'Call Ended',
+          description: 'Video call has ended.',
+        });
+      }
+      
+      // Play the audio response if available
+      if (systemStatus.last_audio) {
+        playAudio(systemStatus.last_audio);
+      }
+      
+      // Clear pending command
+      clearPendingCommand();
+      api.post('/api/clear-pending-command', {}).catch(() => {});
+    }
+  }, [pendingCommand, clearPendingCommand, toast, playAudio, systemStatus.last_audio, isCallActive]);
+
+  // Handle call_nurse command from voice
+  useEffect(() => {
+    if (pendingCommand && pendingCommand.intent === 'call_nurse') {
+      const commandId = `call-nurse-${Date.now()}`;
+      
+      if (processedCommandRef.current === commandId) return;
+      processedCommandRef.current = commandId;
+      
+      setShowNurseModal(true);
+      
+      toast({
+        title: 'Calling Nurse Station',
+        description: 'Connecting you to the nurse station...',
+      });
+      
+      // Play the audio response if available
+      if (systemStatus.last_audio) {
+        playAudio(systemStatus.last_audio);
+      }
+      
+      // Clear pending command
+      clearPendingCommand();
+      api.post('/api/clear-pending-command', {}).catch(() => {});
+    }
+  }, [pendingCommand, clearPendingCommand, toast, playAudio, systemStatus.last_audio]);
+
+  // Handle mute_call command from voice
+  useEffect(() => {
+    if (pendingCommand && pendingCommand.intent === 'mute_call') {
+      const commandId = `mute-call-${Date.now()}`;
+      
+      if (processedCommandRef.current === commandId) return;
+      processedCommandRef.current = commandId;
+      
+      if (isCallActive) {
+        setIsCallMuted(true);
+        toast({
+          title: 'Microphone Muted',
+          description: 'Your microphone is now muted.',
+        });
+      }
+      
+      // Play the audio response if available
+      if (systemStatus.last_audio) {
+        playAudio(systemStatus.last_audio);
+      }
+      
+      clearPendingCommand();
+      api.post('/api/clear-pending-command', {}).catch(() => {});
+    }
+  }, [pendingCommand, clearPendingCommand, toast, playAudio, systemStatus.last_audio, isCallActive]);
+
+  // Handle unmute_call command from voice
+  useEffect(() => {
+    if (pendingCommand && pendingCommand.intent === 'unmute_call') {
+      const commandId = `unmute-call-${Date.now()}`;
+      
+      if (processedCommandRef.current === commandId) return;
+      processedCommandRef.current = commandId;
+      
+      if (isCallActive) {
+        setIsCallMuted(false);
+        toast({
+          title: 'Microphone Unmuted',
+          description: 'Your microphone is now on.',
+        });
+      }
+      
+      // Play the audio response if available
+      if (systemStatus.last_audio) {
+        playAudio(systemStatus.last_audio);
+      }
+      
+      clearPendingCommand();
+      api.post('/api/clear-pending-command', {}).catch(() => {});
+    }
+  }, [pendingCommand, clearPendingCommand, toast, playAudio, systemStatus.last_audio, isCallActive]);
+
+  // Handle toggle_camera command from voice
+  useEffect(() => {
+    if (pendingCommand && pendingCommand.intent === 'toggle_camera') {
+      const commandId = `toggle-camera-${Date.now()}`;
+      
+      if (processedCommandRef.current === commandId) return;
+      processedCommandRef.current = commandId;
+      
+      if (isCallActive) {
+        const turnCameraOn = pendingCommand.slots?.camera_on;
+        const newVideoOff = turnCameraOn === false ? true : turnCameraOn === true ? false : !isCallVideoOff;
+        setIsCallVideoOff(newVideoOff);
+        toast({
+          title: newVideoOff ? 'Camera Off' : 'Camera On',
+          description: newVideoOff ? 'Your camera is now off.' : 'Your camera is now on.',
+        });
+      }
+      
+      // Play the audio response if available
+      if (systemStatus.last_audio) {
+        playAudio(systemStatus.last_audio);
+      }
+      
+      clearPendingCommand();
+      api.post('/api/clear-pending-command', {}).catch(() => {});
+    }
+  }, [pendingCommand, clearPendingCommand, toast, playAudio, systemStatus.last_audio, isCallActive, isCallVideoOff]);
+
   // Handle active call info from backend
   useEffect(() => {
     if (activeCallInfo && activeCallInfo.room_id && !isCallActive) {
@@ -674,6 +840,8 @@ const Index = () => {
     setCallerName('Family');
     setIncomingCall(null);
     setShowIncomingDialog(false);
+    setIsCallMuted(false);
+    setIsCallVideoOff(false);
   }, []);
 
   // Call a contact by name
@@ -718,6 +886,37 @@ const Index = () => {
       <span>{wakeWordListening ? 'Listening' : 'Voice Off'}</span>
     </div>
   );
+
+  // Show pairing screen if device is not paired (unless disabled in env)
+  if (REQUIRE_PAIRING && !isPaired && !isIdentityLoading) {
+    return (
+      <DevicePairingScreen 
+        onPaired={(patientId, patientName) => {
+          toast({
+            title: `Hello, ${patientName}!`,
+            description: 'CLAIRE is now connected to your profile.',
+          });
+          // Force reload to pick up new identity
+          window.location.reload();
+        }} 
+      />
+    );
+  }
+
+  // Show loading while checking identity
+  if (REQUIRE_PAIRING && isIdentityLoading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-900 via-blue-800 to-indigo-900 flex items-center justify-center">
+        <div className="text-white text-xl flex items-center gap-3">
+          <svg className="animate-spin h-8 w-8" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+          </svg>
+          Loading CLAIRE...
+        </div>
+      </div>
+    );
+  }
 
   return (
     <ResponsiveLayout
@@ -814,6 +1013,10 @@ const Index = () => {
               callerName={callerName}
               onEndCall={handleEndCall}
               isActive={isCallActive}
+              externalMuted={isCallMuted}
+              externalVideoOff={isCallVideoOff}
+              onMuteChange={setIsCallMuted}
+              onVideoChange={setIsCallVideoOff}
             />
           </div>
         ) : currentMode !== 'chat' ? (
@@ -861,6 +1064,17 @@ const Index = () => {
                     </>
                   )}
                 </div>
+
+                {/* Manual activation button */}
+                <Button
+                  variant="outline"
+                  size="lg"
+                  className="mt-4"
+                  onClick={handleClaireCommand}
+                >
+                  <Mic className="w-5 h-5 mr-2" />
+                  Talk to Claire
+                </Button>
 
                 {/* Upcoming Reminders Widget */}
                 {upcomingReminders.length > 0 && (

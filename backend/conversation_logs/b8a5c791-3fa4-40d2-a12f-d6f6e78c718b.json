@@ -1,0 +1,17 @@
+{
+  "patient_id": "b8a5c791-3fa4-40d2-a12f-d6f6e78c718b",
+  "messages": [
+    {
+      "id": "user-1769987981688",
+      "role": "user",
+      "content": "Call family",
+      "timestamp": "2026-02-01T23:19:41.688169"
+    },
+    {
+      "id": "assistant-1769987982783",
+      "role": "assistant",
+      "content": "I'll generate a pairing code for your family. Please hold on.",
+      "timestamp": "2026-02-01T23:19:42.783452"
+    }
+  ]
+}

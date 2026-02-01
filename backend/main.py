@@ -1,15 +1,25 @@
-from fastapi import FastAPI, WebSocket, HTTPException
+from fastapi import FastAPI, WebSocket, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import asyncio
 import json
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 import uuid
+import logging
 
-# Load environment variables from .env file
-load_dotenv()
+# Load environment variables from .env file with explicit path
+env_path = Path(__file__).parent / ".env"
+load_dotenv(dotenv_path=env_path, override=True)
+
+# Debug: Check if Supabase keys are loaded
+print(f"[DEBUG] Working directory: {os.getcwd()}")
+print(f"[DEBUG] .env path: {env_path} (exists: {env_path.exists()})")
+print(f"[DEBUG] SUPABASE_URL: {os.getenv('SUPABASE_URL', 'NOT SET')[:30]}...")
+print(f"[DEBUG] SUPABASE_SERVICE_KEY exists: {bool(os.getenv('SUPABASE_SERVICE_KEY'))}")
+
 from contextlib import asynccontextmanager
 from fastapi.responses import StreamingResponse
 from datetime import datetime, timedelta
@@ -22,12 +32,24 @@ from extended_commands import COMMANDS, CommandCategory
 from reminders import ReminderManager, ReminderType, ReminderFrequency
 from realtime_data import data_fetcher
 from contacts import contact_manager, Contact, Guardian, Patient
-from chat_history import save_message, get_history, clear_history, get_all_patients_with_history
+from chat_history import save_message, get_history, clear_history, get_all_patients_with_history, set_broadcast_callback
+from supabase_client import (
+    get_supabase, is_supabase_configured, SupabaseNotConfiguredError,
+    PatientDB, GuardianDB, PatientSettingsDB, ContactsDB, RemindersDB,
+    ConversationDB, ActivityLogDB, AuthHelpers
+)
+
+logger = logging.getLogger(__name__)
 
 # Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 JITSI_BASE_URL = os.getenv("JITSI_BASE_URL", "https://meet.jit.si" )
 DEFAULT_ROOM = os.getenv("DEFAULT_ROOM", "nurse-station")
+
+# WebRTC TURN Server Configuration
+TURN_SERVER_URL = os.getenv("TURN_SERVER_URL", "turn:a.relay.metered.ca:443")
+TURN_SERVER_USERNAME = os.getenv("TURN_SERVER_USERNAME", "e8e8e8e8e8e8e8e8e8e8e8e8")
+TURN_SERVER_CREDENTIAL = os.getenv("TURN_SERVER_CREDENTIAL", "e8e8e8e8e8e8e8e8e8e8e8e8")
 
 # Global state
 class SystemState:
@@ -46,6 +68,7 @@ class SystemState:
         self.microphone_sensitivity = 0.7  # 0.0-1.0
         self.output_delay_ms = 0  # For measuring output delay
         self.active_call_info = None  # Store active call details for frontend
+        self.call_event = None  # Transient call events (answered, rejected, missed)
 
     async def broadcast_update(self):
         update = {
@@ -60,10 +83,24 @@ class SystemState:
             "microphone_sensitivity": self.microphone_sensitivity,
             "pending_command": self.pending_command,
             "active_call_info": self.active_call_info,
+            "call_event": self.call_event,
         }
         for connection in self.connections.copy():
             try:
                 await connection.send_json({"type": "system_update", "payload": update})
+            except:
+                self.connections.discard(connection)
+
+    async def broadcast_conversation_update(self, patient_id: str, message: dict):
+        """Broadcast a new conversation message to all connected clients."""
+        update = {
+            "type": "conversation_update",
+            "patient_id": patient_id,
+            "message": message,
+        }
+        for connection in self.connections.copy():
+            try:
+                await connection.send_json(update)
             except:
                 self.connections.discard(connection)
 
@@ -145,6 +182,14 @@ class UserProfileRequest(BaseModel):
 class MicrophoneSettingsRequest(BaseModel):
     sensitivity: float  # 0.0-1.0
 
+class PatientSettingsRequest(BaseModel):
+    patient_id: str = "patient-main"
+    wake_word_sensitivity: str = "medium"  # low, medium, high
+    voice_speed: str = "normal"  # slow, normal, fast
+    auto_answer_family_calls: bool = False
+    quiet_hours_start: str = "22:00"
+    quiet_hours_end: str = "08:00"
+
 # Contact Management Request Models
 class AddContactRequest(BaseModel):
     contact_id: Optional[str] = None
@@ -186,13 +231,63 @@ class InitiateContactCallRequest(BaseModel):
     contact_name: str
     call_type: str = "video"  # video, audio
 
+# Device Pairing Models
+class DeviceRegisterRequest(BaseModel):
+    device_serial: str  # Unique hardware identifier
+
+class DeviceRegisterResponse(BaseModel):
+    device_id: str
+    status: str
+
+class DevicePairRequest(BaseModel):
+    device_id: str
+    pairing_code: str
+
+class DevicePairResponse(BaseModel):
+    success: bool
+    patient_id: Optional[str] = None
+    patient_name: Optional[str] = None
+    room_number: Optional[str] = None
+    message: str
+
+class DeviceIdentityResponse(BaseModel):
+    patient_id: str
+    patient_name: str
+    room_number: Optional[str] = None
+    settings: Dict[str, Any]
+    contacts: List[Dict[str, Any]]
+
+# Per-patient state management
+patient_states: Dict[str, "SystemState"] = {}
+
+def get_patient_state(patient_id: str) -> "SystemState":
+    """Get or create a SystemState for a specific patient."""
+    if patient_id not in patient_states:
+        patient_states[patient_id] = SystemState()
+    return patient_states[patient_id]
+
+# Device registry (in-memory, synced with Supabase)
+device_registry: Dict[str, Dict[str, Any]] = {}  # device_id -> {patient_id, device_serial}
+
 # Lifespan
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
+    
+    # Reset and reinitialize Supabase client with fresh env vars
+    from supabase_client import reset_supabase_client, get_supabase
+    reset_supabase_client()
+    try:
+        get_supabase()  # Force initialization with service_role key
+    except Exception as e:
+        logger.warning(f"Supabase not configured: {e}")
+    
     await voice_service.start()
     await data_fetcher.start()
     await reminder_manager.start_monitoring()
+    
+    # Register conversation broadcast callback for real-time updates
+    set_broadcast_callback(state.broadcast_conversation_update)
     
     # Initialize sample contacts for demo
     contact_manager.add_contact(
@@ -299,6 +394,207 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ============================================================================
+# DEVICE PAIRING AND IDENTITY ENDPOINTS
+# ============================================================================
+
+@app.post("/api/device/register", response_model=DeviceRegisterResponse)
+async def register_device(request: DeviceRegisterRequest):
+    """Register a new CLAIRE device. Returns a unique device_id."""
+    device_id = str(uuid.uuid4())
+    
+    # Store in memory (this would also go to Supabase devices table)
+    device_registry[device_id] = {
+        "device_serial": request.device_serial,
+        "patient_id": None,
+        "registered_at": datetime.utcnow().isoformat()
+    }
+    
+    if is_supabase_configured():
+        try:
+            get_supabase().table("devices").insert({
+                "id": device_id,
+                "device_serial": request.device_serial,
+                "is_online": True
+            }).execute()
+        except Exception as e:
+            logger.error(f"Failed to save device to Supabase: {e}")
+    
+    return DeviceRegisterResponse(device_id=device_id, status="registered")
+
+
+@app.post("/api/device/pair", response_model=DevicePairResponse)
+async def pair_device(request: DevicePairRequest):
+    """Pair a device with a patient using their pairing code."""
+    
+    if not is_supabase_configured():
+        # Demo mode - use default patient
+        patient_id = "demo-patient-" + request.pairing_code
+        device_registry[request.device_id] = {
+            "patient_id": patient_id,
+            "paired_at": datetime.utcnow().isoformat()
+        }
+        return DevicePairResponse(
+            success=True,
+            patient_id=patient_id,
+            patient_name="Demo Patient",
+            room_number="101",
+            message="Paired in demo mode"
+        )
+    
+    # Verify pairing code in Supabase
+    patient = await PatientDB.verify_pairing_code(request.pairing_code)
+    
+    if not patient:
+        return DevicePairResponse(
+            success=False,
+            message="Invalid or expired pairing code"
+        )
+    
+    # Update patient with device_id
+    try:
+        get_supabase().table("patients").update({
+            "device_id": request.device_id,
+            "pairing_code": None,  # Clear code after use
+            "pairing_code_expires_at": None
+        }).eq("id", patient["id"]).execute()
+        
+        # Create or update device in registry (upsert)
+        try:
+            get_supabase().table("devices").upsert({
+                "id": request.device_id,
+                "patient_id": patient["id"],
+                "is_online": True,
+                "device_type": "tablet",
+                "last_seen": datetime.utcnow().isoformat()
+            }).execute()
+        except Exception as device_err:
+            # Device table update is optional - log but don't fail
+            logger.warning(f"Failed to update devices table: {device_err}")
+        
+        # Store in memory
+        device_registry[request.device_id] = {
+            "patient_id": patient["id"],
+            "paired_at": datetime.utcnow().isoformat()
+        }
+        
+        return DevicePairResponse(
+            success=True,
+            patient_id=patient["id"],
+            patient_name=patient["name"],
+            room_number=patient.get("room_number"),
+            message=f"Successfully paired with {patient['name']}"
+        )
+    except Exception as e:
+        logger.error(f"Failed to pair device: {e}")
+        return DevicePairResponse(
+            success=False,
+            message="Failed to complete pairing"
+        )
+
+
+@app.get("/api/device/identity")
+async def get_device_identity(x_device_id: str = Header(None)):
+    """Get the patient identity for a paired device."""
+    
+    if not x_device_id:
+        raise HTTPException(status_code=400, detail="X-Device-Id header required")
+    
+    # Check memory first
+    device_info = device_registry.get(x_device_id)
+    
+    if not device_info or not device_info.get("patient_id"):
+        # Try Supabase
+        if is_supabase_configured():
+            try:
+                patient = await PatientDB.get_by_device_id(x_device_id)
+                if patient:
+                    device_info = {"patient_id": patient["id"]}
+                    device_registry[x_device_id] = device_info
+            except Exception as e:
+                logger.error(f"Error looking up device: {e}")
+        
+        if not device_info or not device_info.get("patient_id"):
+            raise HTTPException(status_code=404, detail="Device not paired")
+    
+    patient_id = device_info["patient_id"]
+    
+    # Get patient info
+    patient = None
+    settings = {}
+    contacts = []
+    
+    if is_supabase_configured():
+        try:
+            patient = await PatientDB.get_by_id(patient_id)
+            settings_data = await PatientSettingsDB.get(patient_id)
+            if settings_data:
+                settings = settings_data
+            contacts_data = await ContactsDB.get_all(patient_id)
+            if contacts_data:
+                contacts = contacts_data
+        except Exception as e:
+            logger.error(f"Error fetching patient data: {e}")
+    
+    if not patient:
+        # Demo mode
+        patient = {"id": patient_id, "name": "Demo Patient", "room_number": "101"}
+    
+    return {
+        "patient_id": patient["id"],
+        "patient_name": patient["name"],
+        "room_number": patient.get("room_number"),
+        "settings": settings,
+        "contacts": contacts
+    }
+
+
+@app.post("/api/device/unpair")
+async def unpair_device(x_device_id: str = Header(None)):
+    """Unpair a device from its patient (admin function)."""
+    if not x_device_id:
+        raise HTTPException(status_code=400, detail="X-Device-Id header required")
+    
+    if x_device_id in device_registry:
+        patient_id = device_registry[x_device_id].get("patient_id")
+        del device_registry[x_device_id]
+        
+        if is_supabase_configured() and patient_id:
+            try:
+                get_supabase().table("patients").update({
+                    "device_id": None
+                }).eq("id", patient_id).execute()
+                
+                get_supabase().table("devices").update({
+                    "patient_id": None,
+                    "is_online": False
+                }).eq("id", x_device_id).execute()
+            except Exception as e:
+                logger.error(f"Error unpairing in Supabase: {e}")
+    
+    return {"success": True, "message": "Device unpaired"}
+
+
+async def get_current_patient_id(x_device_id: str = Header(None)) -> str:
+    """Dependency to extract patient ID from device."""
+    if not x_device_id:
+        return "patient-main"  # Fallback for backwards compatibility
+    
+    device_info = device_registry.get(x_device_id)
+    if device_info and device_info.get("patient_id"):
+        return device_info["patient_id"]
+    
+    if is_supabase_configured():
+        try:
+            patient = await PatientDB.get_by_device_id(x_device_id)
+            if patient:
+                return patient["id"]
+        except Exception:
+            pass
+    
+    return "patient-main"
+
+
 # Routes
 @app.get("/api/status")
 async def get_status():
@@ -316,8 +612,33 @@ async def get_status():
         "active_call_info": state.active_call_info,
     }
 
+@app.get("/api/ice-servers")
+async def get_ice_servers():
+    """Get ICE server configuration for WebRTC connections."""
+    return {
+        "iceServers": [
+            {"urls": "stun:stun.l.google.com:19302"},
+            {"urls": "stun:stun1.l.google.com:19302"},
+            {
+                "urls": TURN_SERVER_URL,
+                "username": TURN_SERVER_USERNAME,
+                "credential": TURN_SERVER_CREDENTIAL,
+            },
+            {
+                "urls": TURN_SERVER_URL.replace(":443", ":80"),
+                "username": TURN_SERVER_USERNAME,
+                "credential": TURN_SERVER_CREDENTIAL,
+            },
+            {
+                "urls": TURN_SERVER_URL + "?transport=tcp",
+                "username": TURN_SERVER_USERNAME,
+                "credential": TURN_SERVER_CREDENTIAL,
+            },
+        ]
+    }
+
 @app.post("/api/command")
-async def handle_command(request: CommandRequest):
+async def handle_command(request: CommandRequest, x_device_id: str = Header(None), patient_id_override: str = None):
     allowed_intents = {
         "check_vitals", "call_nurse", "navigate", "stop",
         "join_call", "mute_call", "unmute_call", "end_call", "answer_call", "reject_call",
@@ -326,11 +647,15 @@ async def handle_command(request: CommandRequest):
         "set_reminder", "list_reminders", "adjust_volume", "enhance_microphone",
         "weather", "time", "date", "news", "emergency",
         "room_service", "pain_assessment", "mood_check", "health_tips", "medication_taken",
-        "toggle_camera", "share_screen", "switch_mode", "show_contacts", "add_contact", "remove_contact", "cancel_reminder"
+        "toggle_camera", "share_screen", "switch_mode", "show_contacts", "add_contact", "remove_contact", "cancel_reminder",
+        "generate_invite_code"
     }
 
     if request.intent not in allowed_intents:
         raise HTTPException(status_code=400, detail=f"Invalid intent: {request.intent}")
+    
+    # Get patient ID - prefer override (from programmatic call) over header
+    patient_id = patient_id_override or await get_current_patient_id(x_device_id)
 
     try:
         if request.intent == "assistant_enable":
@@ -654,7 +979,6 @@ async def handle_command(request: CommandRequest):
             if not contact_name:
                 state.last_response = "What's the name of the contact you want to add?"
             else:
-                import uuid
                 contact_id = str(uuid.uuid4())[:8]
                 contact_manager.add_contact(
                     contact_id=contact_id,
@@ -721,8 +1045,60 @@ async def handle_command(request: CommandRequest):
                     "intent": "switch_mode",
                     "slots": {"mode_name": mode_name}
                 }
+        
+        elif request.intent == "generate_invite_code":
+            # Generate a 6-digit pairing code for family members
+            if is_supabase_configured() and patient_id:
+                try:
+                    code = await PatientDB.generate_pairing_code(patient_id)
+                    if code:
+                        state.last_response = f"Here's your family pairing code: {code}. It's valid for 24 hours. Give this code to your family member so they can connect their device."
+                        state.pending_command = {
+                            "intent": "generate_invite_code",
+                            "slots": {"code": code}
+                        }
+                    else:
+                        state.last_response = "I'm sorry, I couldn't generate a pairing code right now. Please try again."
+                except Exception as e:
+                    logger.error(f"Error generating invite code: {e}")
+                    state.last_response = "I'm sorry, there was an error generating the pairing code."
+            else:
+                # In-memory fallback
+                import random
+                code = ''.join([str(random.randint(0, 9)) for _ in range(6)])
+                patient_invite_codes[code] = patient_id
+                state.last_response = f"Here's your family pairing code: {code}. It's valid for 24 hours."
 
         await state.broadcast_update()
+        
+        # Log activity to Supabase
+        if is_supabase_configured() and patient_id:
+            try:
+                # Log important intents
+                loggable_intents = {
+                    "call_nurse": "Called nurse station",
+                    "call_family": f"Called family member",
+                    "call_contact": f"Called contact: {request.slots.get('contact_name', 'unknown') if request.slots else 'unknown'}",
+                    "emergency": "Emergency button pressed",
+                    "check_vitals": "Requested vitals check",
+                    "set_reminder": f"Set reminder: {request.slots.get('reminder_text', '') if request.slots else ''}",
+                    "medication_taken": "Confirmed medication taken",
+                    "switch_mode": f"Switched mode to {request.slots.get('mode_name', 'unknown') if request.slots else 'unknown'}",
+                    "pain_assessment": "Started pain assessment",
+                    "mood_check": "Completed mood check",
+                    "generate_invite_code": "Generated family pairing code",
+                }
+                if request.intent in loggable_intents:
+                    description = loggable_intents[request.intent]
+                    await ActivityLogDB.log(
+                        patient_id=patient_id,
+                        activity_type=f"command_{request.intent}",
+                        description=description,
+                        metadata={"intent": request.intent, "slots": request.slots}
+                    )
+            except Exception as log_error:
+                logger.warning(f"Failed to log activity: {log_error}")
+        
         return {"success": True, "message": f"Executed {request.intent}"}
 
     except Exception as e:
@@ -731,25 +1107,29 @@ async def handle_command(request: CommandRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/text-command")
-async def handle_text_command(request: TextCommandRequest):
+async def handle_text_command(request: TextCommandRequest, x_device_id: str = Header(None)):
     if not state.assistant_enabled:
         raise HTTPException(status_code=400, detail="Assistant is not enabled.")
     
     try:
-        await voice_service.process_text_command(request.text)
+        # Get patient ID from device header
+        patient_id = await get_current_patient_id(x_device_id)
+        
+        # Process command with patient context
+        await voice_service.process_text_command(request.text, patient_id=patient_id)
         
         if state.pending_command:
             cmd = state.pending_command
             intent = cmd["intent"]
             slots = cmd.get("slots", {})
             
-            # Execute the command using the command handler
+            # Execute the command using the command handler, passing patient_id
             cmd_req = CommandRequest(intent=intent, slots=slots)
-            await handle_command(cmd_req)
+            await handle_command(cmd_req, patient_id_override=patient_id)
             
             # Commands that require frontend action should NOT be cleared here
             # The frontend will clear them via /api/clear-pending-command
-            frontend_action_commands = ["switch_mode", "show_contacts", "incoming_call", "call_family", "answer_call"]
+            frontend_action_commands = ["switch_mode", "show_contacts", "incoming_call", "call_family", "answer_call", "join_call", "end_call", "mute_call", "unmute_call", "toggle_camera", "call_nurse"]
             if intent not in frontend_action_commands:
                 state.pending_command = None
         
@@ -778,13 +1158,30 @@ async def clear_pending_command():
     return {"success": True, "message": "Pending command cleared."}
 
 @app.post("/api/reminders")
-async def create_reminder(request: ReminderRequest):
+async def create_reminder(request: ReminderRequest, x_device_id: str = Header(None)):
     """Create a new reminder."""
+    patient_id = await get_current_patient_id(x_device_id)
+    
     try:
         scheduled_time = datetime.fromisoformat(request.scheduled_time)
         frequency = ReminderFrequency(request.frequency.lower())
         reminder_type = ReminderType(request.reminder_type.lower())
         
+        # Store in Supabase if configured
+        if is_supabase_configured():
+            reminder = await RemindersDB.create(
+                patient_id=patient_id,
+                title=request.title,
+                reminder_type=request.reminder_type,
+                scheduled_time=scheduled_time.strftime("%H:%M"),
+                is_active=True
+            )
+            if reminder:
+                # Log activity
+                await ActivityLogDB.log(patient_id, "reminder_created", f"Created reminder: {request.title}")
+                return {"success": True, "reminder_id": reminder.get("id")}
+        
+        # Fallback to in-memory
         reminder_id = reminder_manager.add_reminder(
             title=request.title,
             description=request.description,
@@ -799,8 +1196,19 @@ async def create_reminder(request: ReminderRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/api/reminders")
-async def get_reminders():
-    """Get all reminders."""
+async def get_reminders(x_device_id: str = Header(None)):
+    """Get all reminders for the current patient."""
+    patient_id = await get_current_patient_id(x_device_id)
+    
+    # Try Supabase first
+    if is_supabase_configured():
+        try:
+            reminders = await RemindersDB.get_all(patient_id)
+            return {"reminders": reminders}
+        except Exception as e:
+            logger.error(f"Error fetching reminders from Supabase: {e}")
+    
+    # Fallback to in-memory
     reminders = reminder_manager.get_all_reminders()
     return {"reminders": [r.to_dict() for r in reminders]}
 
@@ -841,6 +1249,65 @@ async def set_microphone_settings(request: MicrophoneSettingsRequest):
     await state.broadcast_update()
     return {"success": True, "sensitivity": state.microphone_sensitivity}
 
+
+# ============================================================================
+# PATIENT SETTINGS ENDPOINTS
+# ============================================================================
+
+# Store patient settings as JSON files
+SETTINGS_DIR = Path(__file__).parent / "patient_settings"
+SETTINGS_DIR.mkdir(exist_ok=True)
+
+def get_patient_settings_path(patient_id: str) -> Path:
+    """Get the file path for a patient's settings."""
+    safe_id = "".join(c for c in patient_id if c.isalnum() or c in "-_")
+    return SETTINGS_DIR / f"{safe_id}.json"
+
+def load_patient_settings(patient_id: str) -> dict:
+    """Load patient settings from file."""
+    path = get_patient_settings_path(patient_id)
+    if path.exists():
+        with open(path, "r") as f:
+            return json.load(f)
+    # Return defaults
+    return {
+        "patient_id": patient_id,
+        "wake_word_sensitivity": "medium",
+        "voice_speed": "normal",
+        "auto_answer_family_calls": False,
+        "quiet_hours_start": "22:00",
+        "quiet_hours_end": "08:00"
+    }
+
+def save_patient_settings(settings: dict) -> None:
+    """Save patient settings to file."""
+    patient_id = settings.get("patient_id", "patient-main")
+    path = get_patient_settings_path(patient_id)
+    with open(path, "w") as f:
+        json.dump(settings, f, indent=2)
+
+@app.get("/api/patient-settings/{patient_id}")
+async def get_patient_settings(patient_id: str):
+    """Get patient settings."""
+    settings = load_patient_settings(patient_id)
+    return {"success": True, "settings": settings}
+
+@app.post("/api/patient-settings")
+async def update_patient_settings(request: PatientSettingsRequest):
+    """Update patient settings."""
+    settings = {
+        "patient_id": request.patient_id,
+        "wake_word_sensitivity": request.wake_word_sensitivity,
+        "voice_speed": request.voice_speed,
+        "auto_answer_family_calls": request.auto_answer_family_calls,
+        "quiet_hours_start": request.quiet_hours_start,
+        "quiet_hours_end": request.quiet_hours_end
+    }
+    save_patient_settings(settings)
+    await state.broadcast_update()
+    return {"success": True, "settings": settings}
+
+
 # ============================================================================
 # FAMILY AUTHENTICATION ENDPOINTS
 # ============================================================================
@@ -863,7 +1330,60 @@ class FamilyLoginRequest(BaseModel):
 
 @app.post("/api/family/register")
 async def family_register(request: FamilyRegisterRequest):
-    """Register a new family member account."""
+    """Register a new family member account using Supabase Auth."""
+    
+    # Use Supabase if configured
+    if is_supabase_configured():
+        try:
+            # Verify patient invite code first
+            patient = await PatientDB.verify_pairing_code(request.patient_code)
+            if not patient:
+                raise HTTPException(status_code=400, detail="Invalid or expired invite code")
+            
+            # Create guardian through Supabase Auth (creates auth user + guardian profile)
+            result = await AuthHelpers.signup_guardian(
+                email=request.email.lower(),
+                password=request.password,
+                name=request.name,
+                relationship=request.relationship
+            )
+            
+            if not result.get("success"):
+                error_msg = result.get("error", "Registration failed")
+                # Check for common error types
+                if "rate limit" in error_msg.lower():
+                    raise HTTPException(status_code=429, detail="Too many registration attempts. Please wait a few minutes and try again.")
+                elif "already registered" in error_msg.lower() or "already exists" in error_msg.lower():
+                    raise HTTPException(status_code=400, detail="This email is already registered. Please login instead.")
+                else:
+                    raise HTTPException(status_code=400, detail=f"Registration failed: {error_msg}")
+            
+            guardian_id = result["user"].id if result.get("user") else result["guardian"]["id"]
+            
+            # Link guardian to patient
+            await GuardianDB.link_to_patient(
+                guardian_id=guardian_id,
+                patient_id=patient["id"],
+                is_primary=True
+            )
+            
+            # Log activity
+            await ActivityLogDB.log(patient["id"], "guardian_registered", 
+                f"New guardian registered: {request.name}")
+            
+            return {
+                "success": True, 
+                "message": "Account created successfully",
+                "guardian_id": guardian_id
+            }
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Supabase registration error: {e}")
+            raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
+    
+    # Fallback to in-memory (demo mode only)
     # Check if email already exists
     if request.email.lower() in [acc.get("email", "").lower() for acc in family_accounts.values()]:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -891,32 +1411,95 @@ async def family_register(request: FamilyRegisterRequest):
 
 @app.post("/api/family/login")
 async def family_login(request: FamilyLoginRequest):
-    """Login as a family member."""
-    # Find account by email
-    account = None
-    for acc in family_accounts.values():
-        if acc.get("email", "").lower() == request.email.lower():
-            account = acc
-            break
+    """Login as a family member using Supabase Auth."""
     
-    # For demo purposes, also allow any login
-    if not account:
-        # Create demo account on-the-fly
-        family_id = f"family-{uuid.uuid4().hex[:8]}"
-        account = {
-            "id": family_id,
-            "name": request.email.split("@")[0].title(),
-            "email": request.email.lower(),
-            "password": request.password,
-            "relationship": "Family Member",
-            "patient_id": "patient-main",
-            "created_at": datetime.now().isoformat(),
-        }
-        family_accounts[family_id] = account
+    # Use Supabase Auth if configured
+    supabase_login_failed = False
+    if is_supabase_configured():
+        try:
+            result = await AuthHelpers.login_guardian(
+                email=request.email.lower(),
+                password=request.password
+            )
+            
+            if result:
+                guardian = result.get("guardian")
+                patients = result.get("patients", [])
+                session = result.get("session")
+                
+                # Get first patient (or None if not linked to any)
+                patient_id = patients[0]["id"] if patients else None
+                patient_name = patients[0].get("name", "Unknown") if patients else None
+                
+                return {
+                    "success": True,
+                    "token": session.access_token if session else None,
+                    "refresh_token": session.refresh_token if session else None,
+                    "family_id": guardian.get("id") if guardian else result["user"].id,
+                    "name": guardian.get("name") if guardian else request.email.split("@")[0],
+                    "patient_id": patient_id,
+                    "patient_name": patient_name,
+                    "patients": [{"id": p["id"], "name": p["name"], "room_number": p.get("room_number")} 
+                                for p in patients],
+                    "expires_at": session.expires_at if session else None
+                }
+            else:
+                supabase_login_failed = True
+                
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Supabase login error: {e}")
+            supabase_login_failed = True
     
-    # Verify password (in production, compare hashed passwords)
-    if account.get("password") != request.password:
-        raise HTTPException(status_code=401, detail="Invalid email or password")
+    # If Supabase auth failed or not configured, allow demo mode login
+    # Users can login with any email using "demo" as password
+    if not request.password or (request.password != "demo" and supabase_login_failed):
+        # Check in-memory accounts for regular fallback
+        account = None
+        for acc in family_accounts.values():
+            if acc.get("email", "").lower() == request.email.lower():
+                account = acc
+                break
+        
+        if not account or account.get("password") != request.password:
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+    else:
+        # Demo mode: allow login with password "demo" or any email when Supabase is not configured
+        account = None
+        for acc in family_accounts.values():
+            if acc.get("email", "").lower() == request.email.lower():
+                account = acc
+                break
+        
+        if not account:
+            # Try to get the first patient from Supabase for demo mode
+            demo_patient_id = "patient-main"
+            demo_patient_name = "Patient"
+            if is_supabase_configured():
+                try:
+                    from supabase_client import get_supabase
+                    sb = get_supabase()
+                    result = sb.table("patients").select("id, name").limit(1).execute()
+                    if result.data:
+                        demo_patient_id = result.data[0]["id"]
+                        demo_patient_name = result.data[0].get("name", "Patient")
+                except Exception as e:
+                    logger.warning(f"Could not fetch demo patient: {e}")
+            
+            # Create demo account on-the-fly
+            family_id = f"family-{uuid.uuid4().hex[:8]}"
+            account = {
+                "id": family_id,
+                "name": request.email.split("@")[0].title(),
+                "email": request.email.lower(),
+                "password": request.password,
+                "relationship": "Family Member",
+                "patient_id": demo_patient_id,
+                "patient_name": demo_patient_name,
+                "created_at": datetime.now().isoformat(),
+            }
+            family_accounts[family_id] = account
     
     # Create session token
     token = f"session-{uuid.uuid4().hex}"
@@ -931,6 +1514,7 @@ async def family_login(request: FamilyLoginRequest):
         "family_id": account["id"],
         "name": account["name"],
         "patient_id": account["patient_id"],
+        "patient_name": account.get("patient_name"),
     }
 
 @app.post("/api/family/logout")
@@ -963,19 +1547,241 @@ async def get_family_patient_data(patient_id: str):
         }
     }
 
+# --- Store for call history (in-memory, will be replaced with Supabase) ---
+call_history: Dict[str, list] = {}  # patient_id -> list of call records
+
+@app.get("/api/patient/{patient_id}/status")
+async def get_patient_status(patient_id: str):
+    """
+    Get patient online status - checks if device is online based on last heartbeat.
+    Returns patient details including online status, device info, and last seen time.
+    """
+    is_online = False
+    last_seen = None
+    device_id = None
+    patient_name = "Patient"
+    room_number = None
+    
+    # Use Supabase if configured
+    if is_supabase_configured():
+        try:
+            patient = await PatientDB.get_by_id(patient_id)
+            if patient:
+                patient_name = patient.get("name", "Patient")
+                room_number = patient.get("room_number")
+                # Device ID is stored on patient record
+                patient_device_id = patient.get("device_id")
+                if patient_device_id:
+                    device_id = patient_device_id
+                    # Check if device is in registry (active connection)
+                    if device_id in device_registry:
+                        is_online = True
+                        last_seen = datetime.now().isoformat()
+                    else:
+                        # Try getting from devices table
+                        try:
+                            result = get_supabase().table("devices").select("*").eq("patient_id", patient_id).limit(1).execute()
+                            if result.data:
+                                device = result.data[0]
+                                last_seen_str = device.get("last_seen_at")
+                                if last_seen_str:
+                                    last_seen_dt = datetime.fromisoformat(last_seen_str.replace('Z', '+00:00'))
+                                    last_seen = last_seen_str
+                                    age = (datetime.now(last_seen_dt.tzinfo) - last_seen_dt).total_seconds()
+                                    is_online = age < 120
+                        except:
+                            pass
+        except Exception as e:
+            logger.error(f"Error fetching patient status: {e}")
+    
+    # Fallback to in-memory device registry
+    if not device_id:
+        for dev_id, dev_info in device_registry.items():
+            if dev_info.get("patient_id") == patient_id:
+                device_id = dev_id
+                is_online = True  # Assume online if in registry
+                last_seen = datetime.now().isoformat()
+                break
+    
+    # If device is in registry, it's online regardless of DB state
+    if device_id and device_id in device_registry:
+        is_online = True
+        last_seen = datetime.now().isoformat()
+    
+    return {
+        "patient_id": patient_id,
+        "name": patient_name,
+        "room_number": room_number,
+        "is_online": is_online,
+        "last_seen": last_seen,
+        "device_id": device_id,
+    }
+
+@app.get("/api/family/call-history/{patient_id}")
+async def get_call_history(patient_id: str, limit: int = 20):
+    """Get call history for a patient."""
+    calls = []
+    
+    # Use Supabase if configured
+    if is_supabase_configured():
+        try:
+            from supabase_client import supabase
+            result = supabase.table("call_sessions").select("*").eq(
+                "patient_id", patient_id
+            ).order("started_at", desc=True).limit(limit).execute()
+            
+            if result.data:
+                # Map to frontend expected format
+                calls = [{
+                    "id": c["id"],
+                    "caller_name": c.get("caller_name", "Unknown"),
+                    "patient_name": "Patient",
+                    "started_at": c.get("started_at"),
+                    "ended_at": c.get("ended_at"),
+                    "duration_seconds": (
+                        int((datetime.fromisoformat(c["ended_at"].replace("Z", "+00:00")) - 
+                             datetime.fromisoformat(c["started_at"].replace("Z", "+00:00"))).total_seconds())
+                        if c.get("ended_at") and c.get("started_at") else 0
+                    ),
+                    "status": c.get("status", "completed"),
+                    "direction": "incoming" if c.get("caller_type") == "guardian" else "outgoing",
+                } for c in result.data]
+        except Exception as e:
+            logger.error(f"Error fetching call history from Supabase: {e}")
+    
+    # Fallback to in-memory
+    if not calls:
+        calls = call_history.get(patient_id, [])[-limit:]
+        calls.reverse()  # Most recent first
+    
+    return {"calls": calls, "patient_id": patient_id}
+
+@app.post("/api/family/log-call")
+async def log_call(request: dict):
+    """Log a call attempt/completion for history."""
+    patient_id = request.get("patient_id")
+    caller_name = request.get("caller_name", "Unknown")
+    status = request.get("status", "unknown")
+    duration = request.get("duration_seconds", 0)
+    error = request.get("error")
+    call_id = request.get("call_id", str(uuid.uuid4()))
+    
+    # Map status to call_sessions status
+    status_map = {
+        "completed": "completed",
+        "missed": "missed",
+        "rejected": "declined",
+        "failed": "missed",
+    }
+    db_status = status_map.get(status, status)
+    
+    # Use Supabase if configured
+    if is_supabase_configured():
+        try:
+            from supabase_client import supabase
+            
+            # Check if call session exists
+            existing = supabase.table("call_sessions").select("id").eq("id", call_id).execute()
+            
+            if existing.data:
+                # Update existing call session
+                supabase.table("call_sessions").update({
+                    "status": db_status,
+                    "ended_at": datetime.now().isoformat(),
+                    "end_reason": "completed" if status == "completed" else error or status,
+                }).eq("id", call_id).execute()
+            else:
+                # Create new call session
+                supabase.table("call_sessions").insert({
+                    "id": call_id,
+                    "patient_id": patient_id,
+                    "caller_type": "guardian",
+                    "caller_name": caller_name,
+                    "call_type": "video",
+                    "status": db_status,
+                    "started_at": datetime.now().isoformat(),
+                    "ended_at": datetime.now().isoformat() if status in ["completed", "failed", "rejected"] else None,
+                    "end_reason": error if error else None,
+                }).execute()
+                
+        except Exception as e:
+            logger.error(f"Error logging call to Supabase: {e}")
+    
+    # Also store in memory as fallback
+    call_record = {
+        "id": call_id,
+        "patient_id": patient_id,
+        "caller_name": caller_name,
+        "status": status,
+        "duration_seconds": duration,
+        "started_at": datetime.now().isoformat(),
+        "ended_at": datetime.now().isoformat() if status in ["completed", "failed", "rejected"] else None,
+        "error": error,
+        "direction": "incoming",
+    }
+    
+    if patient_id not in call_history:
+        call_history[patient_id] = []
+    call_history[patient_id].append(call_record)
+    
+    # Keep only last 100 calls in memory
+    if len(call_history[patient_id]) > 100:
+        call_history[patient_id] = call_history[patient_id][-100:]
+    
+    return {"success": True, "call_id": call_id}
+
 @app.post("/api/patient/generate-invite-code")
-async def generate_patient_invite_code():
+async def generate_patient_invite_code(x_device_id: str = Header(None)):
     """Generate an invite code for family members to link to this patient."""
-    # Generate a 6-character code
+    patient_id = await get_current_patient_id(x_device_id)
+    
+    # Use Supabase if configured
+    if is_supabase_configured():
+        try:
+            code = await PatientDB.generate_pairing_code(patient_id)
+            if code:
+                await ActivityLogDB.log(patient_id, "invite_code_generated", 
+                    "Generated family invite code")
+                return {"invite_code": code, "patient_id": patient_id}
+        except Exception as e:
+            logger.error(f"Error generating invite code in Supabase: {e}")
+    
+    # Fallback to in-memory
     import random
     import string
     code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-    
-    # Get patient ID from state or create default
-    patient_id = state.user_profile.get("id", "patient-main")
     patient_invite_codes[code] = patient_id
     
     return {"invite_code": code, "patient_id": patient_id}
+
+@app.get("/api/activity-log")
+async def get_activity_log(x_device_id: str = Header(None), limit: int = 50):
+    """Get recent activity log for a patient."""
+    patient_id = await get_current_patient_id(x_device_id)
+    
+    if is_supabase_configured():
+        try:
+            activities = await ActivityLogDB.get_recent(patient_id, limit)
+            return {"activities": activities, "patient_id": patient_id}
+        except Exception as e:
+            logger.error(f"Error fetching activity log: {e}")
+    
+    # Fallback: return empty if not configured
+    return {"activities": [], "patient_id": patient_id}
+
+@app.get("/api/family/activity-log/{patient_id}")
+async def get_family_activity_log(patient_id: str, limit: int = 50):
+    """Get activity log for family dashboard (requires authenticated family member)."""
+    # TODO: Verify family member has access to this patient
+    
+    if is_supabase_configured():
+        try:
+            activities = await ActivityLogDB.get_recent(patient_id, limit)
+            return {"activities": activities, "patient_id": patient_id}
+        except Exception as e:
+            logger.error(f"Error fetching family activity log: {e}")
+    
+    return {"activities": [], "patient_id": patient_id}
 
 @app.get("/api/commands")
 async def get_commands(category: Optional[str] = None):
@@ -1005,6 +1811,15 @@ class ChatMessageRequest(BaseModel):
 @app.get("/api/chat-history/{patient_id}")
 async def get_chat_history(patient_id: str, limit: int = 50, offset: int = 0):
     """Get conversation history for a patient."""
+    # Try Supabase first
+    if is_supabase_configured():
+        try:
+            messages = await ConversationDB.get_history(patient_id, limit=limit)
+            return {"messages": messages, "patient_id": patient_id}
+        except Exception as e:
+            logger.error(f"Error fetching chat history from Supabase: {e}")
+    
+    # Fallback to file-based
     try:
         history = get_history(patient_id, limit=limit, offset=offset)
         return history
@@ -1015,6 +1830,21 @@ async def get_chat_history(patient_id: str, limit: int = 50, offset: int = 0):
 @app.post("/api/chat-history/{patient_id}")
 async def save_chat_message(patient_id: str, message: ChatMessageRequest):
     """Save a message to the patient's conversation history."""
+    # Store in Supabase if configured
+    if is_supabase_configured():
+        try:
+            saved = await ConversationDB.save_message(
+                patient_id=patient_id,
+                role=message.role,
+                content=message.content,
+                intent=message.intent
+            )
+            if saved:
+                return {"status": "saved", "message": saved}
+        except Exception as e:
+            logger.error(f"Error saving to Supabase: {e}")
+    
+    # Fallback to file-based
     try:
         saved_message = save_message(
             patient_id=patient_id,
@@ -1073,10 +1903,29 @@ async def get_robot_status():
 # ============================================================================
 
 @app.post("/api/contacts")
-async def create_contact(request: AddContactRequest):
+async def create_contact(request: AddContactRequest, x_device_id: str = Header(None)):
     """Create a new contact."""
+    patient_id = await get_current_patient_id(x_device_id)
+    
     try:
         contact_id = request.contact_id or f"contact-{uuid.uuid4().hex[:8]}"
+        
+        # Store in Supabase if configured
+        if is_supabase_configured():
+            contact = await ContactsDB.create(
+                patient_id=patient_id,
+                name=request.name,
+                phone=request.phone,
+                email=request.email,
+                relationship=request.relationship,
+                is_emergency=(request.contact_type == "emergency")
+            )
+            if contact:
+                # Log activity
+                await ActivityLogDB.log(patient_id, "contact_added", f"Added contact: {request.name}")
+                return {"success": True, "contact": contact}
+        
+        # Fallback to in-memory
         contact = contact_manager.add_contact(
             contact_id=contact_id,
             name=request.name,
@@ -1133,8 +1982,19 @@ async def delete_contact(contact_id: str):
     raise HTTPException(status_code=404, detail="Contact not found")
 
 @app.get("/api/contacts")
-async def list_contacts():
-    """Get all contacts."""
+async def list_contacts(x_device_id: str = Header(None)):
+    """Get all contacts for the current patient."""
+    patient_id = await get_current_patient_id(x_device_id)
+    
+    # Try Supabase first
+    if is_supabase_configured():
+        try:
+            contacts = await ContactsDB.get_all(patient_id)
+            return {"contacts": contacts}
+        except Exception as e:
+            logger.error(f"Error fetching contacts from Supabase: {e}")
+    
+    # Fallback to in-memory
     contacts = contact_manager.list_contacts()
     return {"contacts": [c.to_dict() for c in contacts]}
 
@@ -1703,7 +2563,21 @@ async def answer_call(request: AnswerCallRequest):
         
         state.call_state = "connecting"
         state.last_response = f"Call answered with {incoming_call.initiator_name}"
+        
+        # Add call_answered event for family portal
+        state.call_event = {
+            "type": "call_answered",
+            "call_id": request.call_id,
+            "patient_id": request.patient_id,
+            "initiator_id": incoming_call.initiator_id,
+            "room_id": incoming_call.room_id,
+            "timestamp": datetime.now().isoformat()
+        }
+        
         await state.broadcast_update()
+        
+        # Clear the event after broadcast
+        state.call_event = None
         
         return {
             "success": True,
@@ -1740,7 +2614,35 @@ async def reject_call(request: AnswerCallRequest):
                 pending_notifications[request.patient_id].remove(request.call_id)
         
         state.last_response = f"Call rejected by {request.patient_id}"
+        
+        # Add call_rejected event for family portal
+        state.call_event = {
+            "type": "call_rejected",
+            "call_id": request.call_id,
+            "patient_id": request.patient_id,
+            "initiator_id": incoming_call.initiator_id,
+            "room_id": incoming_call.room_id,
+            "timestamp": datetime.now().isoformat()
+        }
+        
         await state.broadcast_update()
+        
+        # Clear the event after broadcast
+        state.call_event = None
+        
+        # Log as missed call
+        if incoming_call.patient_id not in call_history:
+            call_history[incoming_call.patient_id] = []
+        call_history[incoming_call.patient_id].append({
+            "id": request.call_id,
+            "patient_id": incoming_call.patient_id,
+            "caller_name": incoming_call.initiator_name,
+            "status": "rejected",
+            "duration_seconds": 0,
+            "started_at": incoming_call.created_at.isoformat(),
+            "ended_at": datetime.now().isoformat(),
+            "direction": "incoming",
+        })
         
         return {
             "success": True,
@@ -1816,18 +2718,40 @@ async def websocket_endpoint(websocket: WebSocket):
                     state.active_call_info = None
         
         await websocket.send_json({"type": "system_update", "payload": await get_status()})
+        
         while True:
-            data = await websocket.receive_text()
-    except:
+            try:
+                # Set a timeout for receiving messages (heartbeat interval)
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
+                
+                # Handle ping/pong for connection keep-alive
+                try:
+                    message = json.loads(data)
+                    if message.get("type") == "ping":
+                        await websocket.send_json({"type": "pong", "timestamp": message.get("timestamp")})
+                except json.JSONDecodeError:
+                    pass  # Not JSON, ignore
+                    
+            except asyncio.TimeoutError:
+                # Send a ping to check if connection is still alive
+                try:
+                    await websocket.send_json({"type": "ping"})
+                except:
+                    break  # Connection is dead
+    except Exception as e:
+        # Connection closed or errored
         pass
     finally:
         state.connections.discard(websocket)
 
 @app.post("/api/stream-response")
-async def stream_response(request: TextCommandRequest):
+async def stream_response(request: TextCommandRequest, x_device_id: str = Header(None)):
     """Stream Claire's response token by token for real-time conversation."""
     if not state.assistant_enabled:
         raise HTTPException(status_code=400, detail="Assistant is not enabled.")
+    
+    # Get patient ID from device header
+    patient_id = await get_current_patient_id(x_device_id)
     
     async def generate():
         try:
@@ -1838,6 +2762,9 @@ async def stream_response(request: TextCommandRequest):
             full_response = ""
             sentence_buffer = ""
             audio_generated = False
+            
+            # Load patient context for this conversation
+            await voice_service.load_patient_context(patient_id)
             
             async for token in voice_service.conversation_manager.stream_response(request.text):
                 full_response += token

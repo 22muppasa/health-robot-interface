@@ -320,6 +320,17 @@ COMMANDS: Dict[str, CommandDefinition] = {
         optional_slots=[],
         confidence_threshold=0.9
     ),
+    
+    # Device & Family Commands
+    "generate_invite_code": CommandDefinition(
+        name="generate_invite_code",
+        description="Generate a 6-digit pairing code for family members to connect",
+        category=CommandCategory.SETTINGS,
+        aliases=["give me a code", "pairing code", "invite code", "family code", "connect family", "add family member"],
+        required_slots=[],
+        optional_slots=[],
+        confidence_threshold=0.8
+    ),
 }
 
 def get_command_by_name(name: str) -> Optional[CommandDefinition]:

@@ -3,6 +3,26 @@
 const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 const WS_BASE_URL = import.meta.env.VITE_WS_URL || '';
 
+// Get the device ID header for authenticated requests
+function getAuthHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  
+  const deviceId = localStorage.getItem('claire_device_id');
+  if (deviceId) {
+    headers['X-Device-Id'] = deviceId;
+  }
+  
+  // Add guardian auth token if available (for family portal)
+  const guardianToken = localStorage.getItem('claire_guardian_token');
+  if (guardianToken) {
+    headers['Authorization'] = `Bearer ${guardianToken}`;
+  }
+  
+  return headers;
+}
+
 // Command structure for robot actions
 export interface RobotCommand {
   intent: string;
@@ -34,6 +54,19 @@ export interface TranscriptUpdate {
   timestamp: string;
 }
 
+export interface ConversationMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+  intent?: string;
+}
+
+export interface ConversationUpdate {
+  patient_id: string;
+  message: ConversationMessage;
+}
+
 // REST API calls
 export const api = {
   // Send a robot command
@@ -43,7 +76,7 @@ export const api = {
     try {
       const response = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({
           intent: command.intent,
           slots: command.slots || {},
@@ -72,7 +105,7 @@ export const api = {
     try {
       const response = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify(data),
       });
       console.log('Post response status:', response.status);
@@ -97,7 +130,7 @@ export const api = {
     try {
       const response = await fetch(url, {
         method: 'GET',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
       });
       console.log('Get response status:', response.status);
       if (!response.ok) {
@@ -118,7 +151,9 @@ export const api = {
     const url = API_BASE_URL ? `${API_BASE_URL}/api/status` : '/api/status';
     console.log('Getting status from:', url);
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, {
+        headers: getAuthHeaders(),
+      });
       console.log('Status response status:', response.status);
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
@@ -166,11 +201,29 @@ export class WebSocketManager {
     this.ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        
+        // Handle ping from server - respond with pong
+        if (data.type === 'ping') {
+          this.send('pong', { timestamp: Date.now() });
+          return;
+        }
+        
+        // Handle pong from server (keep-alive confirmation)
+        if (data.type === 'pong') {
+          return; // Connection is alive, no action needed
+        }
+        
         console.log('WebSocket message received:', data);
         if (data.type === 'system_update') {
           this.emit('system_status', data.payload);
           this.emit('call_status', { state: data.payload.call_state });
           this.emit('transcript', { text: data.payload.last_transcript, isFinal: true, timestamp: new Date().toISOString() });
+        } else if (data.type === 'conversation_update') {
+          // Real-time conversation message from patient-Claire interaction
+          this.emit('conversation_update', {
+            patient_id: data.patient_id,
+            message: data.message,
+          } as ConversationUpdate);
         }
       } catch (e) {
         console.error('Failed to parse WebSocket message:', e);

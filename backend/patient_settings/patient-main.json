@@ -1,0 +1,8 @@
+{
+  "patient_id": "patient-main",
+  "wake_word_sensitivity": "high",
+  "voice_speed": "slow",
+  "auto_answer_family_calls": true,
+  "quiet_hours_start": "21:00",
+  "quiet_hours_end": "07:00"
+}

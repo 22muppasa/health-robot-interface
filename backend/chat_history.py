@@ -3,16 +3,30 @@ Chat History Storage Module
 
 Provides persistent storage of patient-Claire conversations using JSON files.
 Each patient has their own history file stored in conversation_logs/ directory.
+Supports real-time broadcasting of new messages via WebSocket.
 """
 
 import json
 import os
+import asyncio
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Callable, Awaitable
 from pathlib import Path
 
 # Directory for storing conversation logs
 CHAT_HISTORY_DIR = Path(__file__).parent / "conversation_logs"
+
+# Callback for broadcasting new messages (set by main.py)
+_broadcast_callback: Optional[Callable[[str, Dict], Awaitable[None]]] = None
+
+
+def set_broadcast_callback(callback: Callable[[str, Dict], Awaitable[None]]):
+    """
+    Set the callback function for broadcasting new messages.
+    Called by main.py to register WebSocket broadcasting.
+    """
+    global _broadcast_callback
+    _broadcast_callback = callback
 
 
 def ensure_directory():
@@ -32,7 +46,8 @@ def save_message(
     patient_id: str,
     role: str,
     content: str,
-    intent: Optional[str] = None
+    intent: Optional[str] = None,
+    broadcast: bool = True
 ) -> Dict:
     """
     Save a single message to the patient's chat history.
@@ -42,6 +57,7 @@ def save_message(
         role: "user" or "assistant"
         content: The message content
         intent: Optional intent classification (for assistant messages)
+        broadcast: Whether to broadcast via WebSocket (default True)
     
     Returns:
         The saved message object with timestamp and id
@@ -76,6 +92,18 @@ def save_message(
     # Save updated history
     with open(history_file, "w") as f:
         json.dump(history, f, indent=2)
+    
+    # Broadcast new message via WebSocket if callback is set
+    if broadcast and _broadcast_callback:
+        try:
+            # Schedule the async broadcast in the running event loop
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(_broadcast_callback(patient_id, message))
+            else:
+                loop.run_until_complete(_broadcast_callback(patient_id, message))
+        except Exception as e:
+            print(f"Warning: Failed to broadcast message: {e}")
     
     return message
 

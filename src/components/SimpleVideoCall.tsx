@@ -9,9 +9,22 @@ interface SimpleVideoCallProps {
   callerName?: string;
   onEndCall?: () => void;
   isActive: boolean; // Whether call is active
+  externalMuted?: boolean; // External control of mute state
+  externalVideoOff?: boolean; // External control of video state
+  onMuteChange?: (isMuted: boolean) => void;
+  onVideoChange?: (isVideoOff: boolean) => void;
 }
 
-export function SimpleVideoCall({ roomId, callerName = 'Family', onEndCall, isActive }: SimpleVideoCallProps) {
+export function SimpleVideoCall({ 
+  roomId, 
+  callerName = 'Family', 
+  onEndCall, 
+  isActive,
+  externalMuted,
+  externalVideoOff,
+  onMuteChange,
+  onVideoChange,
+}: SimpleVideoCallProps) {
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
@@ -33,6 +46,7 @@ export function SimpleVideoCall({ roomId, callerName = 'Family', onEndCall, isAc
   const lastRoomIdRef = useRef<string | null>(null);
   const receivedOfferRef = useRef(false);
   const offerTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const connectionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const endCallRef = useRef<() => void>(() => {});
 
   const formatDuration = (seconds: number) => {
@@ -57,6 +71,30 @@ export function SimpleVideoCall({ roomId, callerName = 'Family', onEndCall, isAc
     }, 1000);
     return () => clearInterval(interval);
   }, [isConnected]);
+
+  // Sync external mute state
+  useEffect(() => {
+    if (externalMuted !== undefined && externalMuted !== isMuted) {
+      setIsMuted(externalMuted);
+      if (localStreamRef.current) {
+        localStreamRef.current.getAudioTracks().forEach(track => {
+          track.enabled = !externalMuted;
+        });
+      }
+    }
+  }, [externalMuted, isMuted]);
+
+  // Sync external video state
+  useEffect(() => {
+    if (externalVideoOff !== undefined && externalVideoOff !== isVideoOff) {
+      setIsVideoOff(externalVideoOff);
+      if (localStreamRef.current) {
+        localStreamRef.current.getVideoTracks().forEach(track => {
+          track.enabled = !externalVideoOff;
+        });
+      }
+    }
+  }, [externalVideoOff, isVideoOff]);
 
   // Get local camera stream
   const getLocalStream = useCallback(async () => {
@@ -128,6 +166,11 @@ export function SimpleVideoCall({ roomId, callerName = 'Family', onEndCall, isAc
     pc.onconnectionstatechange = () => {
       console.log('Connection state:', pc.connectionState);
       if (pc.connectionState === 'connected') {
+        // Clear connection timeout since we're now connected
+        if (connectionTimeoutRef.current) {
+          clearTimeout(connectionTimeoutRef.current);
+          connectionTimeoutRef.current = null;
+        }
         setIsConnected(true);
         setIsConnecting(false);
         setError(null);
@@ -259,6 +302,23 @@ export function SimpleVideoCall({ roomId, callerName = 'Family', onEndCall, isAc
         // Reset offer tracking
         receivedOfferRef.current = false;
         
+        // Set connection timeout - if not connected within 60 seconds, end call
+        if (connectionTimeoutRef.current) {
+          clearTimeout(connectionTimeoutRef.current);
+        }
+        connectionTimeoutRef.current = setTimeout(() => {
+          if (!peerConnectionRef.current || peerConnectionRef.current.connectionState !== 'connected') {
+            console.log('Patient: Connection timeout - call taking too long');
+            setError('Connection timeout. Please try again.');
+            toast({
+              title: 'Connection Timeout',
+              description: 'Could not establish connection. Please try calling again.',
+              variant: 'destructive',
+            });
+            endCallRef.current();
+          }
+        }, 60000); // 60 second timeout
+        
         // Send ready signal to trigger re-broadcast of any existing offers
         // This solves the race condition where family sends offer before patient connects
         ws.send(JSON.stringify({ type: 'participant_ready' }));
@@ -316,6 +376,13 @@ export function SimpleVideoCall({ roomId, callerName = 'Family', onEndCall, isAc
       clearTimeout(offerTimeoutRef.current);
       offerTimeoutRef.current = null;
     }
+    
+    // Clear connection timeout
+    if (connectionTimeoutRef.current) {
+      clearTimeout(connectionTimeoutRef.current);
+      connectionTimeoutRef.current = null;
+    }
+    
     receivedOfferRef.current = false;
     
     // Stop local stream
@@ -399,7 +466,9 @@ export function SimpleVideoCall({ roomId, callerName = 'Family', onEndCall, isAc
       localStreamRef.current.getAudioTracks().forEach(track => {
         track.enabled = isMuted;
       });
-      setIsMuted(!isMuted);
+      const newMuted = !isMuted;
+      setIsMuted(newMuted);
+      onMuteChange?.(newMuted);
     }
   };
 
@@ -409,7 +478,9 @@ export function SimpleVideoCall({ roomId, callerName = 'Family', onEndCall, isAc
       localStreamRef.current.getVideoTracks().forEach(track => {
         track.enabled = isVideoOff;
       });
-      setIsVideoOff(!isVideoOff);
+      const newVideoOff = !isVideoOff;
+      setIsVideoOff(newVideoOff);
+      onVideoChange?.(newVideoOff);
     }
   };
 
